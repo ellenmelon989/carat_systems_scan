@@ -1,11 +1,10 @@
 seabreeze
+pymodbus
+optommp
+pyserial
+pyyaml
 numpy
 pandas
 matplotlib
-pyyaml
-
-# Opto 22 PAC access - pick one once confirmed:
-# optommp
-# pymodbus
 
 # Motion controller - add once hardware is identified
