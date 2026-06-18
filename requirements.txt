@@ -1,4 +1,4 @@
-seabreeze>=2.1.0
+seabreeze>=2.1.0,<2.11.0
 pyusb
 pymodbus
 optommp
