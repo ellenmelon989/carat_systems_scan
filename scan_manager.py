@@ -14,7 +14,7 @@ from spectrometer_reader import get_spectrometer_reader
 import numpy as np
 
 from motion_controller import get_motion_controller
-from ir_reader import get_ir_reader
+from ir_reader_trendfile import get_ir_reader #use relevant ir file
 from data_logger import DataLogger, build_point_record
 
 
