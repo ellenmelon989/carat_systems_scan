@@ -1,4 +1,6 @@
 """
+PAC firmware confirmed 10.0 and 10.4 - use this file
+
 rest_ir_reader.py — Opto 22 SNAP PAC REST API backend. PREFERRED PATH.
 
 Endpoint pattern confirmed from Opto 22's own published SNAP PAC code
