@@ -28,9 +28,9 @@ motion:
 ir:
   source: pac          # pac | direct
   pac:
-    ip: null           # confirm on-site
-    tag_name: null     # confirm via PAC Display Basic
-  averaging_time_s: 1.0
+    ip: 10.1.10.219           # confirm on-site
+    tag_name: PyroUnFilterTemp     # confirm via PAC Display Basic
+  averaging_time_s: 5.0
   units: C
 
 oes:
