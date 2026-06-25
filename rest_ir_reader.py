@@ -16,10 +16,10 @@ One-time setup on the controller (developer.opto22.com/rest/pac/quickstart):
   4. In PAC Control, find the exact strategy variable name that holds the
      converted IR temperature (Debug > Inspect on that float variable).
 
-Confirmed endpoint (returns ALL float32 strategy variables as a JSON array):
-    /api/v1/device/strategy/vars/float32s
+Confirmed endpoint (returns ALL float strategy variables as a JSON array):
+    /api/v1/device/strategy/vars/floats
 This class fetches that list and filters by name each read. If you open
-    https://<ip>/api/v1/device/strategy/vars/float32s
+    https://<ip>/api/v1/device/strategy/vars/floats
 in a browser (Swagger UI, once the API's enabled) and find a single-variable
 endpoint, switch to that -- lower latency than pulling the whole list every
 point.
@@ -41,49 +41,54 @@ pac = config["pac"]
 
 class RestApiIRReader(IRReader):
     def __init__(self, controller_ip: str, api_key_id: str, api_key_value: str,
-                 variable_name: str, use_https: bool = True, verify_ssl: bool = False,
-                 emissivity: float = 0.0, timeout: float = 2.0):
+                variable_name: str, use_https: bool = False, verify_ssl: bool = False,
+                timeout: float = 2.0):
         scheme = "https" if use_https else "http"
-        self.url = f"{scheme}://{controller_ip}/api/v1/device/strategy/vars/float32s"
-        self.auth = (api_key_id, api_key_value)
+        base = f"{scheme}://{controller_ip}/api/v1/device/strategy/vars"
+        self.url_floats  = f"{base}/floats"
+        self.url_int32s  = f"{base}/int32s"
+        self.auth        = (api_key_id, api_key_value)
         self.variable_name = variable_name
-        self.emissivity = emissivity
-        self.verify_ssl = verify_ssl
-        self.timeout = timeout
-        self.session = requests.Session()
+        self.verify_ssl  = verify_ssl
+        self.timeout     = timeout
+        self.session     = requests.Session()
+
+    def _get_float(self, name: str) -> float:
+        resp = self.session.get(f"{self.url_floats}/{name}", auth=self.auth,
+                                timeout=self.timeout, verify=self.verify_ssl)
+        resp.raise_for_status()
+        return float(resp.json()["value"])
+
+    def _get_int32(self, name: str) -> int:
+        resp = self.session.get(f"{self.url_int32s}/{name}", auth=self.auth,
+                                timeout=self.timeout, verify=self.verify_ssl)
+        resp.raise_for_status()
+        return int(resp.json()["value"])
 
     def read(self) -> IRReading:
         read_time = time.time()
         try:
-            resp = self.session.get(self.url, auth=self.auth,
-                                     timeout=self.timeout, verify=self.verify_ssl)
-            resp.raise_for_status()
-            variables = resp.json()
-            for v in variables:
-                if v.get("name") == self.variable_name:
-                    return IRReading(
-                        value_c=float(v["value"]),
-                        emissivity=self.emissivity,
-                        pac_timestamp=read_time,
-                        read_time=read_time,
-                        stale=False,
-                    )
-            return IRReading(value_c=float("nan"), emissivity=self.emissivity,
-                              pac_timestamp=None, read_time=read_time, stale=True,
-                              error=f"variable '{self.variable_name}' not found in response")
+            invalid = self._get_int32("PyroTempInvalid")
+            if invalid != 0:
+                return IRReading(value_c=float("nan"), emissivity=float("nan"),
+                                pac_timestamp=None, read_time=read_time, stale=True,
+                                error="PyroTempInvalid flag set")
+            temp  = self._get_float(self.variable_name)      # iai_PYRO_TEMP
+            emis  = self._get_float("iai_PYRO_EMISSIVITY")
+            return IRReading(value_c=temp, emissivity=emis,
+                            pac_timestamp=read_time, read_time=read_time, stale=False)
         except requests.RequestException as e:
-            return IRReading(value_c=float("nan"), emissivity=self.emissivity,
-                              pac_timestamp=None, read_time=read_time, stale=True,
-                              error=str(e))
-
+            return IRReading(value_c=float("nan"), emissivity=float("nan"),
+                            pac_timestamp=None, read_time=read_time, stale=True,
+                            error=str(e))
 
 if __name__ == "__main__":
     # Fill these in once REST is enabled on the controller, then run directly
     # to sanity-check a single read before wiring it into scan_manager.py.
     reader = RestApiIRReader(
         controller_ip=pac["ip"],
-        api_key_id="",
-        api_key_value="",
+        api_key_id=pac["api_key_id"],
+        api_key_value=pac["api_key_value"],
         variable_name=pac["tag_name"],
     )
     print(reader.read())
