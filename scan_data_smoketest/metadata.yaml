@@ -1,0 +1,66 @@
+calibration_notes: null
+config:
+  error_policy:
+    max_retries: 2
+    on_failure: nan_and_flag
+  ir:
+    averaging_time_s: 5.0
+    pac:
+      api_key_id: carat_scanner
+      api_key_value: 8e0dfa59309756a5e943894e97dd2fcba463ded1b68bc7bd5ab5696af2bb94bb
+      ip: 192.168.61.231
+      tag_name: iai_PYRO_TEMP
+    source: pac
+    units: C
+  metadata:
+    calibration_notes: null
+    operator: null
+    reactor_run_number: null
+  motion:
+    controller: null
+    homing_required: true
+    port: null
+    soft_limits:
+      x_max_mm: 50
+      x_min_mm: 0
+      y_max_mm: 50
+      y_min_mm: 0
+  oes:
+    backend: mock
+    boxcar_width: 2
+    feature_window_nm: 1.0
+    features:
+      C2_Swan: 516.0
+      CH: 431.0
+      H_alpha: 656.3
+      H_beta: 486.1
+    integration_time_us: 20000
+    num_averages: 3
+  output:
+    base_dir: ./scan_data_smoketest
+    log_file: scan_log.txt
+    metadata_file: metadata.yaml
+    spectra_subdir: spectra
+    summary_csv: scan_summary.csv
+  scan:
+    dwell_time_s: 0.5
+    grid:
+      nx: 3
+      ny: 3
+      x_range_mm:
+      - 0
+      - 50
+      y_range_mm:
+      - 0
+      - 50
+    reference_point:
+      enabled: true
+      position:
+      - 0
+      - 0
+      revisit_every_n_points: 4
+    scan_order: raster
+    settle_time_s: 0.5
+operator: null
+reactor_run_number: null
+scan_started: '2026-06-26T15:16:04.194987'

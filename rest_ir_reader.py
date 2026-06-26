@@ -31,13 +31,9 @@ Requires: pip install requests
 
 import time
 import requests
-import yaml
 
 from ir_reader_base import IRReader, IRReading
 
-with open("config.yaml") as f:
-    config = yaml.safe_load(f)
-pac = config["pac"]
 
 class RestApiIRReader(IRReader):
     def __init__(self, controller_ip: str, api_key_id: str, api_key_value: str,
@@ -83,8 +79,10 @@ class RestApiIRReader(IRReader):
                             error=str(e))
 
 if __name__ == "__main__":
-    # Fill these in once REST is enabled on the controller, then run directly
-    # to sanity-check a single read before wiring it into scan_manager.py.
+    import yaml
+    with open("config.yaml") as f:
+        config = yaml.safe_load(f)
+    pac = config["ir"]["pac"]
     reader = RestApiIRReader(
         controller_ip=pac["ip"],
         api_key_id=pac["api_key_id"],

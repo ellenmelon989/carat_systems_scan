@@ -36,3 +36,36 @@ class SpectrometerReader:
 
     def close(self):
         pass
+
+
+def get_spectrometer_reader(config) -> "SpectrometerReader":
+    """
+    Factory. Returns the appropriate SpectrometerReader based on
+    config["oes"]["backend"]:
+      "pyseabreeze" → PySeabreezeSpectrometerReader (real hardware)
+      "mock"        → MockSpectrometerReader
+      None          → MockSpectrometerReader
+    """
+    oes_cfg = config.get("oes", {})
+    backend = oes_cfg.get("backend")
+    integration_time_us = oes_cfg.get("integration_time_us", 20000)
+    num_averages = oes_cfg.get("num_averages", 3)
+    boxcar_width = oes_cfg.get("boxcar_width", 2)
+
+    if backend == "pyseabreeze":
+        from pyseabreeze_spectrometer_reader import PySeabreezeSpectrometerReader
+        return PySeabreezeSpectrometerReader(
+            integration_time_us=integration_time_us,
+            num_averages=num_averages,
+            boxcar_width=boxcar_width,
+        )
+
+    if backend not in (None, "mock"):
+        raise ValueError(f"Unknown oes.backend: {backend!r}. Expected 'pyseabreeze' or 'mock'.")
+
+    from mock_spectrometer_reader import MockSpectrometerReader
+    return MockSpectrometerReader(
+        integration_time_us=integration_time_us,
+        num_averages=num_averages,
+        boxcar_width=boxcar_width,
+    )

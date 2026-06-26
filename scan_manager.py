@@ -10,11 +10,11 @@ Implements:
 - Per-point error policy (retry -> NaN + flag -> continue)
 - Periodic revisit of a fixed reference point for drift tracking
 """
-from spectrometer_reader import get_spectrometer_reader
 import numpy as np
 
 from motion_controller import get_motion_controller
-from ir_reader_trendfile import get_ir_reader #use relevant ir file
+from ir_reader_base import get_ir_reader
+from spectrometer_reader_base import get_spectrometer_reader
 from data_logger import DataLogger, build_point_record
 
 
@@ -141,11 +141,11 @@ class ScanManager:
         max_retries = self.error_cfg["max_retries"]
         for attempt in range(max_retries + 1):
             try:
-                wl, intens, saturated = self.spectrometer.acquire_averaged(
-                    num_averages=self.oes_cfg["num_averages"],
-                    boxcar_width=self.oes_cfg["boxcar_width"],
-                )
-                return {"saturated": saturated, "error": False}, wl, intens
+                reading = self.spectrometer.read()
+                if reading.error:
+                    raise IOError(reading.error)
+                return ({"saturated": reading.saturated, "error": False},
+                        reading.wavelengths, reading.intensities)
             except Exception as e:
                 self.logger.log_event(f"OES read failed (attempt {attempt + 1}): {e}")
 
@@ -158,10 +158,13 @@ if __name__ == "__main__":
     with open("config.yaml") as f:
         config = yaml.safe_load(f)
 
-    # Use a tiny grid for a quick smoke test
+    # Fast params for smoke test — override slow real-scan values
     config["scan"]["grid"]["nx"] = 3
     config["scan"]["grid"]["ny"] = 3
+    config["scan"]["settle_time_s"] = 0.0
+    config["scan"]["reference_point"]["enabled"] = True
     config["scan"]["reference_point"]["revisit_every_n_points"] = 4
+    config["ir"]["averaging_time_s"] = 0.2   # 5s → 0.2s for smoke test
     config["output"]["base_dir"] = "./scan_data_smoketest"
 
     manager = ScanManager(config)
