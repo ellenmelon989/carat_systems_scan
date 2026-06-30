@@ -7,11 +7,12 @@ Prerequisites (see check_seabreeze_device.py -- run that first):
   - pip install "seabreeze>=2.1.0" pyusb   (in the carat_scans env)
   - libusb-1.0.dll (64-bit) placed in C:\\Windows\\System32
 
-IMPORTANT: seabreeze.use('pyseabreeze') must be called before any import of
-seabreeze.spectrometers, in this process. If scan_manager.py or anything
-else imports seabreeze.spectrometers before this module runs, the backend
-silently locks to cseabreeze instead. Import this module first, or at minimum
-make sure nothing else touches seabreeze before it.
+seabreeze.use('pyseabreeze') and the seabreeze.spectrometers import are
+intentionally deferred to __init__ (not module level). This ensures the
+backend selection only runs when this reader is actually instantiated,
+so importing this module does not globally lock the seabreeze backend.
+That keeps oceandirect_spectrometer_reader.py (or any other backend) safe
+to import in the same process without interference.
 
 API surface below (Spectrometer.intensities/wavelengths/integration_time_micros,
 list_devices, from_first_available/from_serial_number, max_intensity property)
@@ -22,9 +23,6 @@ from memory.
 import time
 from typing import Optional
 
-import seabreeze
-seabreeze.use('pyseabreeze')
-from seabreeze.spectrometers import Spectrometer
 import numpy as np
 
 from spectrometer_reader_base import SpectrometerReader, SpectrumReading
@@ -42,6 +40,9 @@ class PySeabreezeSpectrometerReader(SpectrometerReader):
         self._init_error: Optional[str] = None
 
         try:
+            import seabreeze
+            seabreeze.use('pyseabreeze')
+            from seabreeze.spectrometers import Spectrometer
             self.spec = (Spectrometer.from_serial_number(serial) if serial
                          else Spectrometer.from_first_available())
             self.spec.integration_time_micros(self.integration_time_us)

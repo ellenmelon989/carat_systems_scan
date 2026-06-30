@@ -60,8 +60,16 @@ def get_spectrometer_reader(config) -> "SpectrometerReader":
             boxcar_width=boxcar_width,
         )
 
+    if backend == "oceandirect":
+        from oceandirect_spectrometer_reader import OceanDirectSpectrometerReader
+        return OceanDirectSpectrometerReader(
+            integration_time_us=integration_time_us,
+            num_averages=num_averages,
+            boxcar_width=boxcar_width,
+        )
+
     if backend not in (None, "mock"):
-        raise ValueError(f"Unknown oes.backend: {backend!r}. Expected 'pyseabreeze' or 'mock'.")
+        raise ValueError(f"Unknown oes.backend: {backend!r}. Expected 'pyseabreeze', 'oceandirect', or 'mock'.")
 
     from mock_spectrometer_reader import MockSpectrometerReader
     return MockSpectrometerReader(
