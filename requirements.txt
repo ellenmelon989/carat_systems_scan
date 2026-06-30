@@ -10,5 +10,6 @@ pandas
 matplotlib
 h5py
 xarray
+pylablib
 
 # Motion controller - add once hardware is identified

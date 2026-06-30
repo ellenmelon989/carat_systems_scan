@@ -109,6 +109,10 @@ def get_motion_controller(config):
     """
     Factory function. Returns a MockMotionController unless
     config specifies real hardware.
+
+    Supported controller types:
+      null / omitted   → MockMotionController (development)
+      newport_esp301   → NewportESP301MotionController (real hardware)
     """
     motion_cfg = config.get("motion", {})
     controller_type = motion_cfg.get("controller")
@@ -117,7 +121,14 @@ def get_motion_controller(config):
         print("[motion_controller] No controller configured - using mock")
         return MockMotionController()
 
-    return RealMotionController(port=motion_cfg.get("port"))
+    if controller_type == "newport_esp301":
+        from real_newport_motion import NewportESP301MotionController
+        return NewportESP301MotionController(config)
+
+    raise ValueError(
+        f"Unknown motion controller type: '{controller_type}'. "
+        "Supported: newport_esp301 | null (mock)"
+    )
 
 
 if __name__ == "__main__":
