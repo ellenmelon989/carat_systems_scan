@@ -5,20 +5,37 @@ Writes CSV summaries, per-point spectra files, metadata files,
 and error logs. Designed to be crash-safe: each point's data is
 written to disk immediately (append-only), so a scan that dies
 partway through preserves all completed points.
+
+If an OESStore is provided at construction, full spectra are written
+to HDF5 instead of (or in addition to) per-point CSV files. The HDF5
+path is set via config["output"]["oes_hdf5"] (optional); if absent,
+only CSV spectrum files are written.
 """
 
 import csv
 import os
 import time
 from datetime import datetime
+from typing import Optional
 
 import numpy as np
 import yaml
 
 
 class DataLogger:
-    def __init__(self, config):
+    def __init__(self, config, store=None):
+        """
+        Parameters
+        ----------
+        config : dict
+            Scan configuration (standard shape — see config.yaml).
+        store : OESStore, optional
+            If provided, full spectra are written to HDF5 via
+            store.write_point() in addition to the summary CSV.
+            Pass ix and iy to write_point() when using this.
+        """
         self.config = config
+        self.store = store  # OESStore instance, or None
         out_cfg = config["output"]
 
         self.base_dir = out_cfg["base_dir"]
@@ -51,19 +68,38 @@ class DataLogger:
         with open(self.metadata_path, "w") as f:
             yaml.safe_dump(metadata, f, default_flow_style=False)
 
-    def write_point(self, point_record, wavelengths=None, intensities=None):
+    def write_point(self, point_record, wavelengths=None, intensities=None,
+                    ix: Optional[int] = None, iy: Optional[int] = None):
         """
-        Append one point's summary row to the CSV, and (if provided)
-        write its full spectrum to a separate CSV file.
+        Append one point's summary row to the CSV, write its spectrum
+        to a per-point CSV file, and (if an OESStore is attached) write
+        the full spectrum into the HDF5 file.
 
         point_record: dict with keys such as
             point_id, x_mm, y_mm, ir_temp_c, ir_error,
             oes_error, oes_saturated, feature_<name> values, timestamp
+        ix, iy : int, optional
+            Grid indices required when an OESStore is attached.
+            Ignored (and not needed) for pure-CSV operation.
         """
         self._append_summary_row(point_record)
 
         if wavelengths is not None and intensities is not None:
             self._write_spectrum(point_record["point_id"], wavelengths, intensities)
+
+        # HDF5 write — only if a store is wired up and grid indices are known
+        if self.store is not None and ix is not None and iy is not None:
+            self.store.write_point(
+                ix=ix,
+                iy=iy,
+                wavelengths=wavelengths,
+                intensities=intensities,
+                ir_temp_c=point_record.get("ir_temp_c"),
+                timestamp=time.time(),
+                saturated=bool(point_record.get("oes_saturated", False)),
+                ir_error=bool(point_record.get("ir_error", False)),
+                oes_error=bool(point_record.get("oes_error", False)),
+            )
 
     def _append_summary_row(self, point_record):
         fieldnames = list(point_record.keys())

@@ -3,9 +3,12 @@ pyusb
 pymodbus
 optommp
 pyserial
+requests
 pyyaml
 numpy
 pandas
 matplotlib
+h5py
+xarray
 
 # Motion controller - add once hardware is identified

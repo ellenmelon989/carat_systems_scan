@@ -16,12 +16,16 @@ from motion_controller import get_motion_controller
 from ir_reader_base import get_ir_reader
 from spectrometer_reader_base import get_spectrometer_reader
 from data_logger import DataLogger, build_point_record
+from oes_store import OESStore
 
 
 def generate_grid(scan_cfg):
     """
-    Generate a list of (x_mm, y_mm) points based on config,
+    Generate a list of (ix, iy, x_mm, y_mm) points based on config,
     in raster or serpentine order.
+
+    ix, iy are 0-based grid indices used to address the HDF5 dataset;
+    x_mm, y_mm are the physical positions in millimetres.
     """
     nx = scan_cfg["grid"]["nx"]
     ny = scan_cfg["grid"]["ny"]
@@ -34,14 +38,14 @@ def generate_grid(scan_cfg):
     order = scan_cfg.get("scan_order", "raster")
     points = []
 
-    for j, y in enumerate(ys):
-        row_xs = xs
-        if order == "serpentine" and j % 2 == 1:
-            row_xs = xs[::-1]
-        for x in row_xs:
-            points.append((float(x), float(y)))
+    for iy, y in enumerate(ys):
+        row = list(enumerate(xs))           # [(ix, x), ...]
+        if order == "serpentine" and iy % 2 == 1:
+            row = row[::-1]
+        for ix, x in row:
+            points.append((ix, iy, float(x), float(y)))
 
-    return points
+    return points, xs, ys
 
 
 def extract_features(wavelengths, intensities, features_cfg, window_nm):
@@ -63,12 +67,22 @@ class ScanManager:
         self.motion = get_motion_controller(config)
         self.ir_reader = get_ir_reader(config)
         self.spectrometer = get_spectrometer_reader(config)
-        self.logger = DataLogger(config)
 
         self.scan_cfg = config["scan"]
         self.ir_cfg = config["ir"]
         self.oes_cfg = config["oes"]
         self.error_cfg = config["error_policy"]
+
+        # Build OESStore from grid coords so it's ready before the scan starts.
+        # Wavelength dimension is initialized lazily on first write_point().
+        _, xs, ys = generate_grid(self.scan_cfg)
+        hdf5_path = config["output"].get(
+            "oes_hdf5",
+            config["output"]["base_dir"] + "/oes.h5",
+        )
+        self.store = OESStore(hdf5_path, x_coords_mm=xs, y_coords_mm=ys)
+
+        self.logger = DataLogger(config, store=self.store)
 
     def run(self):
         self.logger.write_metadata()
@@ -77,26 +91,28 @@ class ScanManager:
         self.motion.home()
         self.spectrometer.set_integration_time(self.oes_cfg["integration_time_us"])
 
-        points = generate_grid(self.scan_cfg)
+        points, _, _ = generate_grid(self.scan_cfg)
         ref_cfg = self.scan_cfg.get("reference_point", {})
         ref_enabled = ref_cfg.get("enabled", False)
         ref_every = ref_cfg.get("revisit_every_n_points", 0)
         ref_position = tuple(ref_cfg.get("position", (0.0, 0.0)))
 
         point_id = 0
-        for x, y in points:
-            self._measure_point(point_id, x, y)
+        for ix, iy, x, y in points:
+            self._measure_point(point_id, ix, iy, x, y)
             point_id += 1
 
             if ref_enabled and ref_every > 0 and point_id % ref_every == 0:
                 self.logger.log_event(f"Revisiting reference point {ref_position} "
                                        f"after point {point_id}")
-                self._measure_point(point_id, ref_position[0], ref_position[1], is_reference=True)
+                # Reference points don't belong to the spatial grid — skip HDF5 write
+                self._measure_point(point_id, None, None,
+                                    ref_position[0], ref_position[1], is_reference=True)
                 point_id += 1
 
         self.logger.log_event("Scan complete")
 
-    def _measure_point(self, point_id, x, y, is_reference=False):
+    def _measure_point(self, point_id, ix, iy, x, y, is_reference=False):
         limits = self.config["motion"]["soft_limits"]
         self.motion.check_limits(x, y, limits)
 
@@ -117,7 +133,15 @@ class ScanManager:
         record = build_point_record(point_id, x, y, ir_result, oes_result, feature_values)
         record["is_reference"] = is_reference
 
-        self.logger.write_point(record, wavelengths=wavelengths, intensities=intensities)
+        # Pass ix/iy so DataLogger can forward them to OESStore.
+        # Reference points have ix=iy=None — DataLogger skips the HDF5 write.
+        self.logger.write_point(
+            record,
+            wavelengths=wavelengths,
+            intensities=intensities,
+            ix=ix,
+            iy=iy,
+        )
 
         tag = "REF" if is_reference else "PT"
         self.logger.log_event(
