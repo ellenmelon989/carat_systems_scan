@@ -239,7 +239,7 @@ if __name__ == "__main__":
                 )
 
         ds = OESStore.load(path)
-        print(f"Dataset shape: {dict(ds.dims)}")
+        print(f"Dataset shape: {dict(ds.sizes)}")
         print(f"IR range: {float(ds.ir_temp_c.min()):.1f} – {float(ds.ir_temp_c.max()):.1f} °C")
         c2_map = ds.intensity.sel(wavelength_nm=516.0, method="nearest")
         print(f"C2 Swan (516 nm) map mean: {float(c2_map.mean()):.1f}")
