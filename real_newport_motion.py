@@ -1,50 +1,74 @@
 """
 real_newport_motion.py
 
-Newport ESP301 (or ESP300/302) backend for the CARAT scanner motion system.
-Implements MotionController using pylablib's Newport driver over RS-232/USB-serial.
+Newport 8742 Picomotor controller backend for the CARAT scanner.
+Hardware: Newport 8742 controller + 8816-6 motorized mirror mounts.
+Communication: Ethernet (TCP, port 23).
 
-Hardware assumptions
---------------------
-- Newport ESP301 multi-axis controller, firmware >= 3.x
-- Axis 1 → X, Axis 2 → Y  (overridable via config)
-- Controller units pre-configured to millimetres (see UNITS NOTE below)
-- RS-232 at 19200 baud, 8N1, hardware flow control OFF (ESP301 default)
+Implements MotionController using pylablib's Picomotor8742 driver.
 
-UNITS NOTE: The ESP301 stores per-axis units in non-volatile memory.
-Before first use, verify with `1SN?` (axis 1 units). Value 2 = mm.
-If not already mm, run once from a terminal:
-    1SN2   (set axis 1 to mm)
-    2SN2   (set axis 2 to mm)
-    SM     (save to NVM)
-This driver does NOT override the on-controller unit setting at runtime
-to avoid clobbering a carefully calibrated setup.
+Coordinate system
+-----------------
+The 8816-6 is an ANGULAR mount.  The scan grid is defined in mm of
+displacement at the plasma surface.  Conversion is:
+
+    steps = mm * steps_per_mm
+
+steps_per_mm must be calibrated on-site (see CALIBRATION NOTE below).
+Separate values for X and Y axes because the two mount axes may differ
+in mechanical advantage and beam geometry.
+
+CALIBRATION NOTE
+----------------
+To measure steps_per_mm for each axis:
+  1. Put a target (paper, camera) at the plasma plane.
+  2. Command 1000 steps on axis 1: python real_newport_motion.py <ip> --calibrate-x 1000
+  3. Measure how far the beam spot moved (mm).
+  4. steps_per_mm_x = 1000 / measured_mm
+  5. Repeat for axis 2 (--calibrate-y).
+  6. Enter both values in config.yaml under motion.
+
+HOMING NOTE
+-----------
+The 8742 / picomotor system is open-loop — there are no encoders or
+limit switches on the 8816-6.  "Homing" here means:
+  - Drive toward the mount's mechanical hard stop at slow speed
+    (limit_steps steps in the negative direction)
+  - Reset the internal step counter to 0 at that position
+  - This gives a repeatable origin across power cycles
+The alternative (soft home = just zero the counter at current position)
+is also supported; set hard_home: false in config.
 
 Config keys (under motion:)
 ---------------------------
-  controller: newport_esp301
-  port: "COM3"          # Windows: "COM3"; Linux: "/dev/ttyUSB0"
-  baud: 19200           # default; most ESP301s ship at 19200
-  axis_x: 1            # ESP301 axis number for X
-  axis_y: 2            # ESP301 axis number for Y
-  home_timeout_s: 60   # per-axis home timeout
-  move_timeout_s: 30   # per-axis move timeout
+  controller: newport_8742
+  host: "192.168.100.2"     # 8742 IP; default is 192.168.100.2
+  tcp_port: 23              # 8742 Telnet port (default 23)
+  axis_x: 1                 # 8742 axis number for X mirror axis
+  axis_y: 2                 # 8742 axis number for Y mirror axis
+  steps_per_mm_x: 500       # CALIBRATE ON-SITE (see above)
+  steps_per_mm_y: 500       # CALIBRATE ON-SITE (see above)
+  hard_home: true           # true = drive to hard stop; false = zero-in-place
+  home_steps: 100000        # steps to drive toward hard stop during homing
+  home_velocity: 200        # steps/s during homing (slow to avoid crash)
+  move_velocity: 2000       # steps/s during normal scan moves
+  home_timeout_s: 60        # per-axis home timeout
+  move_timeout_s: 30        # per-axis move timeout
 
 Usage
 -----
-    from real_newport_motion import NewportESP301MotionController
-    mc = NewportESP301MotionController(config)
+    from real_newport_motion import NewportPicomotorController
+    mc = NewportPicomotorController(config)
     mc.home()
     mc.move_to(10.0, 25.0)
     mc.wait_for_settle(0.5)
-    print(mc.get_position())
+    print(mc.get_position())   # returns (mm, mm) based on step count
     mc.close()
 
-Or as a context manager:
-    with NewportESP301MotionController(config) as mc:
+As context manager:
+    with NewportPicomotorController(config) as mc:
         mc.home()
-        mc.move_to(10.0, 25.0)
-        mc.wait_for_settle(0.5)
+        ...
 """
 
 import time
@@ -54,8 +78,7 @@ try:
     from pylablib.devices import Newport
 except ImportError as exc:
     raise ImportError(
-        "pylablib is required for NewportESP301MotionController. "
-        "Install with: pip install pylablib"
+        "pylablib is required. Install with: pip install pylablib"
     ) from exc
 
 from motion_controller import MotionController
@@ -64,60 +87,89 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Defaults — overridden by config["motion"] keys
+# Defaults — all overridable in config.yaml under motion:
 # ---------------------------------------------------------------------------
-_DEFAULT_BAUD = 19200
+_DEFAULT_HOST = "192.168.100.2"
+_DEFAULT_PORT = 23
 _DEFAULT_AXIS_X = 1
 _DEFAULT_AXIS_Y = 2
-_DEFAULT_HOME_TIMEOUT_S = 60.0
-_DEFAULT_MOVE_TIMEOUT_S = 30.0
+_DEFAULT_STEPS_PER_MM = 500        # placeholder — MUST calibrate on-site
+_DEFAULT_HARD_HOME = True
+_DEFAULT_HOME_STEPS = 100_000      # large enough to always reach the hard stop
+_DEFAULT_HOME_VELOCITY = 200       # steps/s — slow for safety at hard stop
+_DEFAULT_MOVE_VELOCITY = 2000      # steps/s — tune for speed vs. vibration
+_DEFAULT_HOME_TIMEOUT = 60.0
+_DEFAULT_MOVE_TIMEOUT = 30.0
 
 
-class NewportESP301MotionController(MotionController):
+class NewportPicomotorController(MotionController):
     """
-    Real motion controller backend: Newport ESP301 via pylablib.
+    Real motion controller: Newport 8742 Picomotor over Ethernet.
 
-    Thread safety: NOT thread-safe. The scan loop is single-threaded
-    (by design in scan_manager.py), so no locking is added here.
+    Position tracking is in steps (open-loop).  Public API converts
+    to/from mm using steps_per_mm_x / steps_per_mm_y.
+
+    Thread safety: NOT thread-safe (scan loop is single-threaded).
     """
 
     def __init__(self, config: dict):
         motion_cfg = config.get("motion", {})
 
-        port = motion_cfg.get("port")
-        if not port:
-            raise ValueError(
-                "motion.port must be set for newport_esp301 "
-                "(e.g. 'COM3' or '/dev/ttyUSB0')"
-            )
+        host = motion_cfg.get("host", _DEFAULT_HOST)
+        tcp_port = int(motion_cfg.get("tcp_port", _DEFAULT_PORT))
 
-        baud = motion_cfg.get("baud", _DEFAULT_BAUD)
         self._axis_x = int(motion_cfg.get("axis_x", _DEFAULT_AXIS_X))
         self._axis_y = int(motion_cfg.get("axis_y", _DEFAULT_AXIS_Y))
-        self._home_timeout = float(motion_cfg.get("home_timeout_s", _DEFAULT_HOME_TIMEOUT_S))
-        self._move_timeout = float(motion_cfg.get("move_timeout_s", _DEFAULT_MOVE_TIMEOUT_S))
 
-        self._homed = False
-        self._position = (0.0, 0.0)  # last-commanded, updated on move_to
-
-        logger.info(
-            "Connecting to Newport ESP301 on %s at %d baud "
-            "(X=axis%d, Y=axis%d)",
-            port, baud, self._axis_x, self._axis_y,
+        self._steps_per_mm_x = float(
+            motion_cfg.get("steps_per_mm_x", _DEFAULT_STEPS_PER_MM)
+        )
+        self._steps_per_mm_y = float(
+            motion_cfg.get("steps_per_mm_y", _DEFAULT_STEPS_PER_MM)
         )
 
-        # pylablib connection string for serial: "portname::baud"
-        conn = f"{port}::{baud}"
+        self._hard_home = bool(motion_cfg.get("hard_home", _DEFAULT_HARD_HOME))
+        self._home_steps = int(motion_cfg.get("home_steps", _DEFAULT_HOME_STEPS))
+        self._home_velocity = int(motion_cfg.get("home_velocity", _DEFAULT_HOME_VELOCITY))
+        self._move_velocity = int(motion_cfg.get("move_velocity", _DEFAULT_MOVE_VELOCITY))
+        self._home_timeout = float(motion_cfg.get("home_timeout_s", _DEFAULT_HOME_TIMEOUT))
+        self._move_timeout = float(motion_cfg.get("move_timeout_s", _DEFAULT_MOVE_TIMEOUT))
+
+        self._homed = False
+        # Internal step-count origin (set during home)
+        self._origin_x = 0
+        self._origin_y = 0
+
+        if self._steps_per_mm_x == _DEFAULT_STEPS_PER_MM:
+            logger.warning(
+                "steps_per_mm_x is using the default placeholder value (%g). "
+                "Calibrate on-site and update config.yaml.",
+                _DEFAULT_STEPS_PER_MM,
+            )
+        if self._steps_per_mm_y == _DEFAULT_STEPS_PER_MM:
+            logger.warning(
+                "steps_per_mm_y is using the default placeholder value (%g). "
+                "Calibrate on-site and update config.yaml.",
+                _DEFAULT_STEPS_PER_MM,
+            )
+
+        logger.info(
+            "Connecting to Newport 8742 at %s:%d (X=axis%d, Y=axis%d)",
+            host, tcp_port, self._axis_x, self._axis_y,
+        )
+
         try:
-            self._stage = Newport.ESP301(conn)
+            self._stage = Newport.Picomotor8742(host=host, port=tcp_port)
         except Exception as exc:
             raise RuntimeError(
-                f"Failed to open Newport ESP301 on {port}: {exc}"
+                f"Failed to connect to Newport 8742 at {host}:{tcp_port}: {exc}\n"
+                "Check: (1) IP address correct? (2) cable plugged in? "
+                "(3) controller powered on?"
             ) from exc
 
-        logger.info("ESP301 connected. Firmware: %s", self._get_firmware_version())
-        self._check_axis_configured(self._axis_x)
-        self._check_axis_configured(self._axis_y)
+        logger.info("8742 connected.")
+        self._set_velocity(self._axis_x, self._move_velocity)
+        self._set_velocity(self._axis_y, self._move_velocity)
 
     # ------------------------------------------------------------------
     # MotionController interface
@@ -125,91 +177,90 @@ class NewportESP301MotionController(MotionController):
 
     def home(self):
         """
-        Home both axes sequentially (X then Y).
+        Home both axes.
 
-        The ESP301 moves each axis to the home switch, then sets that
-        position as the origin.  This call blocks until both axes have
-        finished homing or raises RuntimeError on timeout.
+        hard_home=True  → drives each axis toward its mechanical hard
+                          stop for home_steps steps, then zeros the
+                          internal counter. Gives a repeatable absolute
+                          origin across power cycles.
+        hard_home=False → zeros the step counter at the current
+                          position (soft/in-place home). Faster but
+                          origin shifts if the mount is moved by hand.
         """
-        logger.info("Homing X (axis %d)...", self._axis_x)
-        self._stage.home(axis=self._axis_x, wait=False)
-        self._wait_move(self._axis_x, self._home_timeout, label="Home X")
+        if self._hard_home:
+            self._hard_home_axis(self._axis_x, label="X")
+            self._hard_home_axis(self._axis_y, label="Y")
+        else:
+            logger.info("Soft-homing X (axis %d): zeroing counter in place", self._axis_x)
+            self._stage.set_position(axis=self._axis_x, position=0)
+            logger.info("Soft-homing Y (axis %d): zeroing counter in place", self._axis_y)
+            self._stage.set_position(axis=self._axis_y, position=0)
 
-        logger.info("Homing Y (axis %d)...", self._axis_y)
-        self._stage.home(axis=self._axis_y, wait=False)
-        self._wait_move(self._axis_y, self._home_timeout, label="Home Y")
-
+        self._origin_x = self._stage.get_position(axis=self._axis_x)
+        self._origin_y = self._stage.get_position(axis=self._axis_y)
         self._homed = True
-        self._position = (0.0, 0.0)
-        logger.info("Homing complete. Position zeroed.")
+        logger.info(
+            "Homing complete. Step origin: X=%d, Y=%d",
+            self._origin_x, self._origin_y,
+        )
 
     def move_to(self, x_mm: float, y_mm: float):
         """
-        Command an absolute move to (x_mm, y_mm).
+        Absolute move to (x_mm, y_mm) in scan-grid coordinates.
 
-        Issues both axis moves simultaneously (non-blocking), then
-        returns immediately.  Call wait_for_settle() to block until
-        motion is complete and an optional dwell has elapsed.
+        Converts mm → steps using steps_per_mm_x / _y, offsets by the
+        homed origin, and issues both axis moves simultaneously.
+        Returns immediately; call wait_for_settle() to block.
         """
         if not self._homed:
-            raise RuntimeError(
-                "Must call home() before move_to(). "
-                "The ESP301 has no absolute reference until homed."
-            )
+            raise RuntimeError("Must call home() before move_to().")
 
-        logger.debug("move_to(%.4f, %.4f)", x_mm, y_mm)
-        # Issue both moves without waiting so they run in parallel.
-        self._stage.move_to(axis=self._axis_x, position=x_mm)
-        self._stage.move_to(axis=self._axis_y, position=y_mm)
-        self._position = (x_mm, y_mm)  # commanded position; actual may lag
+        target_x = self._origin_x + round(x_mm * self._steps_per_mm_x)
+        target_y = self._origin_y + round(y_mm * self._steps_per_mm_y)
+
+        logger.debug(
+            "move_to(%.4f mm, %.4f mm) → steps (%d, %d)",
+            x_mm, y_mm, target_x, target_y,
+        )
+
+        self._stage.move_to(axis=self._axis_x, position=target_x)
+        self._stage.move_to(axis=self._axis_y, position=target_y)
 
     def get_position(self) -> tuple[float, float]:
         """
-        Return the current encoder-reported position as (x_mm, y_mm).
+        Return current position as (x_mm, y_mm).
 
-        Falls back to last-commanded position if the query fails
-        (e.g. communication glitch), logging a warning.
+        Derived from the internal step counter (open-loop — no encoder).
+        Only accurate if no steps have been lost (normal operation).
         """
         try:
-            x = self._stage.get_position(axis=self._axis_x)
-            y = self._stage.get_position(axis=self._axis_y)
-            return (float(x), float(y))
+            sx = self._stage.get_position(axis=self._axis_x) - self._origin_x
+            sy = self._stage.get_position(axis=self._axis_y) - self._origin_y
+            return (sx / self._steps_per_mm_x, sy / self._steps_per_mm_y)
         except Exception as exc:
-            logger.warning(
-                "get_position() query failed (%s); returning last-commanded %s",
-                exc, self._position,
-            )
-            return self._position
+            logger.warning("get_position() failed: %s", exc)
+            return (0.0, 0.0)
 
     def wait_for_settle(self, settle_time_s: float):
         """
-        Block until both axes have stopped moving, then sleep an
-        additional settle_time_s for mechanical damping.
-
-        Raises RuntimeError if either axis does not stop within
-        move_timeout_s.
+        Block until both axes have stopped, then sleep settle_time_s.
         """
         self._wait_move(self._axis_x, self._move_timeout, label="Wait X")
         self._wait_move(self._axis_y, self._move_timeout, label="Wait Y")
-
         if settle_time_s > 0:
-            logger.debug("Settling for %.3f s", settle_time_s)
+            logger.debug("Settling %.3f s", settle_time_s)
             time.sleep(settle_time_s)
-
-        # Sanity-check for motor fault after every move.
-        self._check_errors()
 
     # ------------------------------------------------------------------
     # Resource management
     # ------------------------------------------------------------------
 
     def close(self):
-        """Release the serial connection to the ESP301."""
         try:
             self._stage.close()
-            logger.info("ESP301 connection closed.")
+            logger.info("8742 connection closed.")
         except Exception as exc:
-            logger.warning("Error closing ESP301 connection: %s", exc)
+            logger.warning("Error closing 8742 connection: %s", exc)
 
     def __enter__(self):
         return self
@@ -218,7 +269,6 @@ class NewportESP301MotionController(MotionController):
         self.close()
 
     def __del__(self):
-        # Best-effort cleanup — don't raise in __del__.
         try:
             self.close()
         except Exception:
@@ -228,67 +278,57 @@ class NewportESP301MotionController(MotionController):
     # Internal helpers
     # ------------------------------------------------------------------
 
+    def _hard_home_axis(self, axis: int, label: str):
+        """
+        Drive axis toward the mechanical hard stop, then zero counter.
+
+        Uses a slow velocity to avoid damaging the mount at the stop.
+        The picomotor stalls harmlessly at the hard stop (no encoder
+        means it just stops counting).  After the timeout, we assume
+        the stop has been reached and zero the position.
+        """
+        logger.info(
+            "Hard-homing %s (axis %d): driving %d steps at %d steps/s",
+            label, axis, self._home_steps, self._home_velocity,
+        )
+        self._set_velocity(axis, self._home_velocity)
+        # Negative direction = toward hard stop (physical mount minimum)
+        self._stage.move_by(axis=axis, steps=-self._home_steps)
+        # Wait for motion to stop (stall at hard stop or steps exhaust)
+        self._wait_move(axis, self._home_timeout, label=f"Home {label}")
+        # Zero the counter here = define this as the origin
+        self._stage.set_position(axis=axis, position=0)
+        logger.info("%s axis homed and zeroed.", label)
+        # Restore normal velocity for scan moves
+        self._set_velocity(axis, self._move_velocity)
+
     def _wait_move(self, axis: int, timeout_s: float, label: str = ""):
-        """
-        Poll until axis stops or timeout_s elapses.
-
-        pylablib's wait_move() can hang if the controller sends an
-        unexpected error mid-motion.  We wrap it with our own deadline
-        so the scan loop always makes progress.
-        """
+        """Poll until axis is not moving or timeout_s elapses."""
         deadline = time.monotonic() + timeout_s
-        try:
-            # pylablib's built-in wait; raises on controller error
-            self._stage.wait_move(axis=axis, timeout=timeout_s)
-        except Exception as exc:
-            # Distinguish timeout from genuine fault
-            if time.monotonic() >= deadline:
+        while time.monotonic() < deadline:
+            try:
+                if not self._stage.is_moving(axis=axis):
+                    return
+            except Exception as exc:
                 raise RuntimeError(
-                    f"[{label}] Axis {axis} did not stop within {timeout_s:.1f} s"
+                    f"[{label}] Lost communication with 8742 while waiting: {exc}"
                 ) from exc
-            raise RuntimeError(
-                f"[{label}] Axis {axis} motion error: {exc}"
-            ) from exc
-
-    def _check_errors(self):
-        """
-        Query the ESP301 error buffer and raise RuntimeError if any
-        error is present.  The ESP301 error queue is FIFO; we drain it.
-        """
+            time.sleep(0.05)
+        # Timeout — stop the axis and raise
         try:
-            # `get_all_errors()` returns a list of (code, message) tuples.
-            # Not all pylablib versions expose this; guard with hasattr.
-            if hasattr(self._stage, "get_all_errors"):
-                errors = self._stage.get_all_errors()
-                if errors:
-                    descriptions = "; ".join(f"{c}: {m}" for c, m in errors)
-                    raise RuntimeError(f"ESP301 reported errors: {descriptions}")
-        except RuntimeError:
-            raise
-        except Exception as exc:
-            # Non-fatal: log and continue if error query itself fails.
-            logger.warning("Could not query ESP301 error buffer: %s", exc)
-
-    def _check_axis_configured(self, axis: int):
-        """
-        Verify that the axis is recognised by the controller
-        (i.e., a motor stage is actually plugged in).
-        """
-        try:
-            stage_id = self._stage.get_stage(axis=axis)
-            logger.info("Axis %d stage ID: %s", axis, stage_id or "<unknown>")
-        except Exception as exc:
-            logger.warning(
-                "Could not verify axis %d configuration: %s — "
-                "check that the stage is connected and powered.",
-                axis, exc,
-            )
-
-    def _get_firmware_version(self) -> str:
-        try:
-            return str(self._stage.get_device_info())
+            self._stage.stop(axis=axis)
         except Exception:
-            return "<unavailable>"
+            pass
+        raise RuntimeError(
+            f"[{label}] Axis {axis} did not stop within {timeout_s:.1f} s"
+        )
+
+    def _set_velocity(self, axis: int, velocity: int):
+        """Set axis velocity in steps/s."""
+        try:
+            self._stage.setup_velocity(axis=axis, speed=velocity)
+        except Exception as exc:
+            logger.warning("Could not set velocity on axis %d: %s", axis, exc)
 
 
 # ---------------------------------------------------------------------------
@@ -297,20 +337,19 @@ class NewportESP301MotionController(MotionController):
 
 def get_motion_controller(config: dict) -> MotionController:
     """
-    Extended factory that handles 'newport_esp301' in addition to the
-    mock path.  Drop this in as a replacement for the function of the
-    same name in motion_controller.py, or call it from there.
+    Extended factory — handles newport_8742 and mock.
 
-    Config example (config.yaml):
+    Drop-in replacement for get_motion_controller() in motion_controller.py,
+    or call from there (see motion_controller.py factory function).
+
+    Config example:
         motion:
-          controller: newport_esp301
-          port: "COM3"
-          axis_x: 1
-          axis_y: 2
-          home_timeout_s: 60
-          move_timeout_s: 30
+          controller: newport_8742
+          host: "192.168.100.2"
+          steps_per_mm_x: 500    # calibrate on-site
+          steps_per_mm_y: 500    # calibrate on-site
     """
-    from motion_controller import MockMotionController  # local import avoids circular
+    from motion_controller import MockMotionController
 
     motion_cfg = config.get("motion", {})
     controller_type = motion_cfg.get("controller")
@@ -319,17 +358,17 @@ def get_motion_controller(config: dict) -> MotionController:
         logger.info("No controller configured — using MockMotionController")
         return MockMotionController()
 
-    if controller_type == "newport_esp301":
-        return NewportESP301MotionController(config)
+    if controller_type == "newport_8742":
+        return NewportPicomotorController(config)
 
     raise ValueError(
         f"Unknown motion controller type: '{controller_type}'. "
-        "Supported: newport_esp301 | null (mock)"
+        "Supported: newport_8742 | null (mock)"
     )
 
 
 # ---------------------------------------------------------------------------
-# Smoke test — run directly to verify connection without a full scan
+# CLI: connection smoke test + calibration helper
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -340,38 +379,66 @@ if __name__ == "__main__":
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
 
-    parser = argparse.ArgumentParser(description="Newport ESP301 connection smoke test")
-    parser.add_argument("port", help="Serial port (e.g. COM3 or /dev/ttyUSB0)")
+    parser = argparse.ArgumentParser(
+        description="Newport 8742 smoke test and calibration helper"
+    )
+    parser.add_argument("host", help="8742 IP address (e.g. 192.168.100.2)")
     parser.add_argument("--axis-x", type=int, default=1)
     parser.add_argument("--axis-y", type=int, default=2)
-    parser.add_argument("--move-x", type=float, default=5.0, help="Test move X mm")
-    parser.add_argument("--move-y", type=float, default=5.0, help="Test move Y mm")
+    parser.add_argument("--move-x", type=float, default=None,
+                        help="Move X by this many mm (requires steps-per-mm-x)")
+    parser.add_argument("--move-y", type=float, default=None,
+                        help="Move Y by this many mm (requires steps-per-mm-y)")
+    parser.add_argument("--steps-per-mm-x", type=float, default=_DEFAULT_STEPS_PER_MM)
+    parser.add_argument("--steps-per-mm-y", type=float, default=_DEFAULT_STEPS_PER_MM)
+    parser.add_argument("--calibrate-x", type=int, default=None,
+                        help="Drive axis X by N steps (measure beam displacement to get steps/mm)")
+    parser.add_argument("--calibrate-y", type=int, default=None,
+                        help="Drive axis Y by N steps (measure beam displacement to get steps/mm)")
     args = parser.parse_args()
 
     cfg = {
         "motion": {
-            "controller": "newport_esp301",
-            "port": args.port,
+            "controller": "newport_8742",
+            "host": args.host,
             "axis_x": args.axis_x,
             "axis_y": args.axis_y,
-            "home_timeout_s": 60,
-            "move_timeout_s": 30,
+            "steps_per_mm_x": args.steps_per_mm_x,
+            "steps_per_mm_y": args.steps_per_mm_y,
+            "hard_home": False,   # soft home for smoke test — safer
         }
     }
 
-    with NewportESP301MotionController(cfg) as mc:
-        print("=== Homing ===")
-        mc.home()
-        print(f"Position after home: {mc.get_position()}")
+    with NewportPicomotorController(cfg) as mc:
 
-        print(f"\n=== Moving to ({args.move_x}, {args.move_y}) ===")
-        mc.move_to(args.move_x, args.move_y)
-        mc.wait_for_settle(settle_time_s=0.2)
-        print(f"Position after move: {mc.get_position()}")
+        if args.calibrate_x is not None:
+            print(f"Calibration: moving axis {args.axis_x} by {args.calibrate_x} steps...")
+            mc._stage.move_by(axis=args.axis_x, steps=args.calibrate_x)
+            mc._wait_move(args.axis_x, 30, "calibrate X")
+            print(f"Done. Measure beam displacement in mm, then: steps_per_mm_x = {args.calibrate_x} / measured_mm")
 
-        print("\n=== Returning to origin ===")
-        mc.move_to(0.0, 0.0)
-        mc.wait_for_settle(settle_time_s=0.2)
-        print(f"Final position: {mc.get_position()}")
+        elif args.calibrate_y is not None:
+            print(f"Calibration: moving axis {args.axis_y} by {args.calibrate_y} steps...")
+            mc._stage.move_by(axis=args.axis_y, steps=args.calibrate_y)
+            mc._wait_move(args.axis_y, 30, "calibrate Y")
+            print(f"Done. Measure beam displacement in mm, then: steps_per_mm_y = {args.calibrate_y} / measured_mm")
 
-    print("\nSmoke test passed.")
+        else:
+            print("=== Homing (soft) ===")
+            mc.home()
+            print(f"Position: {mc.get_position()}")
+
+            if args.move_x is not None or args.move_y is not None:
+                x = args.move_x or 0.0
+                y = args.move_y or 0.0
+                print(f"\n=== Moving to ({x} mm, {y} mm) ===")
+                mc.move_to(x, y)
+                mc.wait_for_settle(0.3)
+                print(f"Position: {mc.get_position()}")
+
+                print("\n=== Returning to origin ===")
+                mc.move_to(0.0, 0.0)
+                mc.wait_for_settle(0.3)
+                print(f"Final position: {mc.get_position()}")
+
+    print("\nDone.")

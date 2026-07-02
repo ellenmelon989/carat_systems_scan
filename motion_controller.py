@@ -121,13 +121,13 @@ def get_motion_controller(config):
         print("[motion_controller] No controller configured - using mock")
         return MockMotionController()
 
-    if controller_type == "newport_esp301":
-        from real_newport_motion import NewportESP301MotionController
-        return NewportESP301MotionController(config)
+    if controller_type == "newport_8742":
+        from real_newport_motion import NewportPicomotorController
+        return NewportPicomotorController(config)
 
     raise ValueError(
         f"Unknown motion controller type: '{controller_type}'. "
-        "Supported: newport_esp301 | null (mock)"
+        "Supported: newport_8742 | null (mock)"
     )
 
 
