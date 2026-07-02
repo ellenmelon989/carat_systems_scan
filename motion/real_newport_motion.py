@@ -159,7 +159,7 @@ class NewportPicomotorController(MotionController):
         )
 
         try:
-            self._stage = Newport.Picomotor8742(host=host, port=tcp_port)
+            self._stage = Newport.Picomotor8742(conn=f"{host}:{tcp_port}")
         except Exception as exc:
             raise RuntimeError(
                 f"Failed to connect to Newport 8742 at {host}:{tcp_port}: {exc}\n"
@@ -349,7 +349,7 @@ def get_motion_controller(config: dict) -> MotionController:
           steps_per_mm_x: 500    # calibrate on-site
           steps_per_mm_y: 500    # calibrate on-site
     """
-    from motion_controller import MockMotionController
+    from .motion_controller import MockMotionController
 
     motion_cfg = config.get("motion", {})
     controller_type = motion_cfg.get("controller")

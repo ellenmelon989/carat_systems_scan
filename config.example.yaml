@@ -16,7 +16,75 @@ scan:
     position: [0, 0]  # placeholder
 
 motion:
-  controller: null      # TBD - identify in Phase 4
+  controller: null      # TBD - identify in Phase 4# Scan configuration for MPCVD 2D diagnostic scanner
+# Fill in real values as hardware is confirmed.
+
+scan:
+  grid:
+    nx: 21          # points in X
+    ny: 21          # points in Y
+    x_range_mm: [0, 50]
+    y_range_mm: [0, 50]
+  scan_order: raster   # raster | serpentine
+  dwell_time_s: 0.5
+  settle_time_s: 0.5
+  reference_point:
+    enabled: true
+    revisit_every_n_points: 25
+    position: [0, 0]  # placeholder
+
+motion:
+  controller: newport_8742
+  host: "192.168.100.2"     # replace with actual IP
+  steps_per_mm_x: 500       # fill in after calibration
+  steps_per_mm_y: 500       # fill in after calibration
+  axis_x: 1
+  axis_y: 2
+  homing_required: true
+  soft_limits:
+    x_min_mm: 0
+    x_max_mm: 50
+    y_min_mm: 0
+    y_max_mm: 50
+
+ir:
+  source: pac          # pac | direct
+  pac:
+    ip: ""           # confirm on-site
+    tag_name: "iai_PYRO_TEMP"      # confirm via PAC Display Basic
+    api_key_id: "carat_scanner"
+    api_key_value: ""
+  averaging_time_s: 5.0
+  units: C
+
+oes:
+  backend: mock        # mock | pyseabreeze
+  integration_time_us: 20000
+  num_averages: 3
+  boxcar_width: 2
+  features:
+    CH: 431.0
+    C2_Swan: 516.0
+    H_alpha: 656.3
+    H_beta: 486.1
+  feature_window_nm: 1.0
+
+error_policy:
+  max_retries: 2
+  on_failure: nan_and_flag   # nan_and_flag | abort
+
+output:
+  base_dir: ./scan_data
+  spectra_subdir: spectra
+  summary_csv: scan_summary.csv
+  metadata_file: metadata.yaml
+  log_file: scan_log.txt
+
+metadata:
+  operator: null
+  reactor_run_number: null
+  calibration_notes: null
+
   port: null
   homing_required: true
   soft_limits:
