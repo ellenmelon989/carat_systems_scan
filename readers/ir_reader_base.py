@@ -64,7 +64,7 @@ def get_ir_reader(config) -> "IRReader":
     source = config.get("ir", {}).get("source")
 
     if source == "pac":
-        from rest_ir_reader import RestApiIRReader
+        from .rest_ir_reader import RestApiIRReader
         ir_cfg = config["ir"]["pac"]
         return RestApiIRReader(
             controller_ip=ir_cfg["ip"],
@@ -76,5 +76,5 @@ def get_ir_reader(config) -> "IRReader":
     if source not in (None, "mock"):
         raise ValueError(f"Unknown ir.source: {source!r}. Expected 'pac' or 'mock'.")
 
-    from mock_ir_reader import MockIRReader
+    from .mock_ir_reader import MockIRReader
     return MockIRReader()

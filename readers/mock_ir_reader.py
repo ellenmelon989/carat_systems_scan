@@ -7,7 +7,7 @@ scan logic while the real backend (REST/OptoMMP/direct tap) gets sorted out.
 import time
 import random
 
-from ir_reader_base import IRReader, IRReading
+from .ir_reader_base import IRReader, IRReading
 
 
 class MockIRReader(IRReader):

@@ -12,9 +12,9 @@ Implements:
 """
 import numpy as np
 
-from motion_controller import get_motion_controller
-from ir_reader_base import get_ir_reader
-from spectrometer_reader_base import get_spectrometer_reader
+from motion.motion_controller import get_motion_controller
+from readers.ir_reader_base import get_ir_reader
+from readers.spectrometer_reader_base import get_spectrometer_reader
 from data_logger import DataLogger, build_point_record
 from oes_store import OESStore
 

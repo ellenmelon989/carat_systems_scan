@@ -11,7 +11,7 @@ from typing import Optional
 
 import numpy as np
 
-from spectrometer_reader_base import SpectrometerReader, SpectrumReading
+from .spectrometer_reader_base import SpectrometerReader, SpectrumReading
 
 
 class MockSpectrometerReader(SpectrometerReader):

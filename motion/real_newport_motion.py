@@ -81,7 +81,7 @@ except ImportError as exc:
         "pylablib is required. Install with: pip install pylablib"
     ) from exc
 
-from motion_controller import MotionController
+from .motion_controller import MotionController
 
 logger = logging.getLogger(__name__)
 

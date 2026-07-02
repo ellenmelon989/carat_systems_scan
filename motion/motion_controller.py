@@ -6,8 +6,8 @@ limits, and settling for the 2D scanning mirror.
 
 Provides a hardware abstraction: MotionController (abstract),
 MockMotionController (for development without hardware), and
-a real implementation to be filled in once motor/controller
-hardware is identified (Phase 4).
+NewportPicomotorController (real Newport 8742 hardware, see
+real_newport_motion.py).
 """
 
 from abc import ABC, abstractmethod
@@ -76,35 +76,6 @@ class MockMotionController(MotionController):
         time.sleep(settle_time_s)
 
 
-class RealMotionController(MotionController):
-    """
-    Placeholder for real motor/controller hardware.
-
-    TODO (Phase 4):
-    - Identify motor type and controller (e.g. stepper + driver,
-      servo, galvo, etc.)
-    - Identify communication protocol (serial, USB, ethernet)
-    - Implement home(), move_to(), get_position(), wait_for_settle()
-    - Define coordinate system and units (mm vs steps vs degrees)
-    """
-
-    def __init__(self, port, **kwargs):
-        self.port = port
-        raise NotImplementedError("Real motion controller not yet implemented - Phase 4")
-
-    def home(self):
-        raise NotImplementedError
-
-    def move_to(self, x_mm, y_mm):
-        raise NotImplementedError
-
-    def get_position(self):
-        raise NotImplementedError
-
-    def wait_for_settle(self, settle_time_s):
-        raise NotImplementedError
-
-
 def get_motion_controller(config):
     """
     Factory function. Returns a MockMotionController unless
@@ -112,7 +83,7 @@ def get_motion_controller(config):
 
     Supported controller types:
       null / omitted   → MockMotionController (development)
-      newport_esp301   → NewportESP301MotionController (real hardware)
+      newport_8742      → NewportPicomotorController (real hardware)
     """
     motion_cfg = config.get("motion", {})
     controller_type = motion_cfg.get("controller")
@@ -122,7 +93,7 @@ def get_motion_controller(config):
         return MockMotionController()
 
     if controller_type == "newport_8742":
-        from real_newport_motion import NewportPicomotorController
+        from .real_newport_motion import NewportPicomotorController
         return NewportPicomotorController(config)
 
     raise ValueError(

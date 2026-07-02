@@ -3,7 +3,7 @@ pyseabreeze_spectrometer_reader.py — real OES backend via python-seabreeze's
 pyseabreeze backend. This is the only documented path for the ADC1000-USB
 (added in seabreeze v2.1.0, tagged EXPERIMENTAL by python-seabreeze).
 
-Prerequisites (see check_seabreeze_device.py -- run that first):
+Prerequisites (see tools/check_seabreeze_device.py -- run that first):
   - pip install "seabreeze>=2.1.0" pyusb   (in the carat_scans env)
   - libusb-1.0.dll (64-bit) placed in C:\\Windows\\System32
 
@@ -25,7 +25,7 @@ from typing import Optional
 
 import numpy as np
 
-from spectrometer_reader_base import SpectrometerReader, SpectrumReading
+from .spectrometer_reader_base import SpectrometerReader, SpectrumReading
 
 
 class PySeabreezeSpectrometerReader(SpectrometerReader):
@@ -108,7 +108,7 @@ class PySeabreezeSpectrometerReader(SpectrometerReader):
 
 
 if __name__ == "__main__":
-    # Run check_seabreeze_device.py first -- this will hang/fail confusingly
+    # Run tools/check_seabreeze_device.py first -- this will hang/fail confusingly
     # if no device is enumerated yet.
     reader = PySeabreezeSpectrometerReader(integration_time_us=100_000, num_averages=3)
     reading = reader.read()

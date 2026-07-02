@@ -32,7 +32,7 @@ Requires: pip install requests
 import time
 import requests
 
-from ir_reader_base import IRReader, IRReading
+from .ir_reader_base import IRReader, IRReading
 
 
 class RestApiIRReader(IRReader):

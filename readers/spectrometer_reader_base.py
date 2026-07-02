@@ -53,7 +53,7 @@ def get_spectrometer_reader(config) -> "SpectrometerReader":
     boxcar_width = oes_cfg.get("boxcar_width", 2)
 
     if backend == "pyseabreeze":
-        from pyseabreeze_spectrometer_reader import PySeabreezeSpectrometerReader
+        from .pyseabreeze_spectrometer_reader import PySeabreezeSpectrometerReader
         return PySeabreezeSpectrometerReader(
             integration_time_us=integration_time_us,
             num_averages=num_averages,
@@ -61,7 +61,7 @@ def get_spectrometer_reader(config) -> "SpectrometerReader":
         )
 
     if backend == "oceandirect":
-        from oceandirect_spectrometer_reader import OceanDirectSpectrometerReader
+        from .oceandirect_spectrometer_reader import OceanDirectSpectrometerReader
         return OceanDirectSpectrometerReader(
             integration_time_us=integration_time_us,
             num_averages=num_averages,
@@ -71,7 +71,7 @@ def get_spectrometer_reader(config) -> "SpectrometerReader":
     if backend not in (None, "mock"):
         raise ValueError(f"Unknown oes.backend: {backend!r}. Expected 'pyseabreeze', 'oceandirect', or 'mock'.")
 
-    from mock_spectrometer_reader import MockSpectrometerReader
+    from .mock_spectrometer_reader import MockSpectrometerReader
     return MockSpectrometerReader(
         integration_time_us=integration_time_us,
         num_averages=num_averages,
