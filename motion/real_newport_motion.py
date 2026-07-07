@@ -83,7 +83,12 @@ except ImportError as exc:
         "pylablib is required. Install with: pip install pylablib"
     ) from exc
 
-from .motion_controller import MotionController
+try:
+    from .motion_controller import MotionController
+except ImportError:
+    # Fallback for running this file directly (e.g. python real_newport_motion.py),
+    # where relative imports don't work because there's no parent package.
+    from motion_controller import MotionController
 
 logger = logging.getLogger(__name__)
 
