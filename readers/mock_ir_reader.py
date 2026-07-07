@@ -7,7 +7,12 @@ scan logic while the real backend (REST/OptoMMP/direct tap) gets sorted out.
 import time
 import random
 
-from .ir_reader_base import IRReader, IRReading
+try:
+    from .ir_reader_base import IRReader, IRReading
+except ImportError:
+    # Fallback for running this file directly (e.g. python mock_ir_reader.py),
+    # where relative imports don't work because there's no parent package.
+    from ir_reader_base import IRReader, IRReading
 
 
 class MockIRReader(IRReader):

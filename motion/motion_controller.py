@@ -93,7 +93,12 @@ def get_motion_controller(config):
         return MockMotionController()
 
     if controller_type == "newport_8742":
-        from .real_newport_motion import NewportPicomotorController
+        try:
+            from .real_newport_motion import NewportPicomotorController
+        except ImportError:
+            # Fallback for running this file directly, where relative imports
+            # don't work because there's no parent package.
+            from real_newport_motion import NewportPicomotorController
         return NewportPicomotorController(config)
 
     raise ValueError(

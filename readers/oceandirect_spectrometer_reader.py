@@ -27,7 +27,12 @@ from typing import Optional
 
 import numpy as np
 
-from .spectrometer_reader_base import SpectrometerReader, SpectrumReading
+try:
+    from .spectrometer_reader_base import SpectrometerReader, SpectrumReading
+except ImportError:
+    # Fallback for running this file directly, where relative imports
+    # don't work because there's no parent package.
+    from spectrometer_reader_base import SpectrometerReader, SpectrumReading
 
 
 class OceanDirectSpectrometerReader(SpectrometerReader):

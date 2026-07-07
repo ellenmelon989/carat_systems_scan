@@ -32,7 +32,12 @@ Requires: pip install requests
 import time
 import requests
 
-from .ir_reader_base import IRReader, IRReading
+try:
+    from .ir_reader_base import IRReader, IRReading
+except ImportError:
+    # Fallback for running this file directly (e.g. python rest_ir_reader.py),
+    # where relative imports don't work because there's no parent package.
+    from ir_reader_base import IRReader, IRReading
 
 
 class RestApiIRReader(IRReader):
