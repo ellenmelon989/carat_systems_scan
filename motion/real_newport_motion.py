@@ -42,8 +42,10 @@ is also supported; set hard_home: false in config.
 Config keys (under motion:)
 ---------------------------
   controller: newport_8742
-  host: "192.168.100.2"     # 8742 IP; default is 192.168.100.2
-  tcp_port: 23              # 8742 Telnet port (default 23)
+  interface: ethernet       # "ethernet" or "usb" (default: ethernet)
+  host: "192.168.100.2"     # 8742 IP; only used when interface: ethernet
+  tcp_port: 23              # 8742 Telnet port (default 23); ethernet only
+  usb_index: 0              # 8742 USB enumeration index; only used when interface: usb
   axis_x: 1                 # 8742 axis number for X mirror axis
   axis_y: 2                 # 8742 axis number for Y mirror axis
   steps_per_mm_x: 500       # CALIBRATE ON-SITE (see above)
@@ -89,8 +91,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 # Defaults — all overridable in config.yaml under motion:
 # ---------------------------------------------------------------------------
+_DEFAULT_INTERFACE = "ethernet"    # "ethernet" or "usb"
 _DEFAULT_HOST = "192.168.100.2"
 _DEFAULT_PORT = 23
+_DEFAULT_USB_INDEX = 0
 _DEFAULT_AXIS_X = 1
 _DEFAULT_AXIS_Y = 2
 _DEFAULT_STEPS_PER_MM = 500        # placeholder — MUST calibrate on-site
@@ -115,8 +119,15 @@ class NewportPicomotorController(MotionController):
     def __init__(self, config: dict):
         motion_cfg = config.get("motion", {})
 
+        interface = str(motion_cfg.get("interface", _DEFAULT_INTERFACE)).lower()
+        if interface not in ("ethernet", "usb"):
+            raise ValueError(
+                f"Unknown motion.interface: '{interface}'. Supported: ethernet | usb"
+            )
+
         host = motion_cfg.get("host", _DEFAULT_HOST)
         tcp_port = int(motion_cfg.get("tcp_port", _DEFAULT_PORT))
+        usb_index = int(motion_cfg.get("usb_index", _DEFAULT_USB_INDEX))
 
         self._axis_x = int(motion_cfg.get("axis_x", _DEFAULT_AXIS_X))
         self._axis_y = int(motion_cfg.get("axis_y", _DEFAULT_AXIS_Y))
@@ -153,14 +164,28 @@ class NewportPicomotorController(MotionController):
                 _DEFAULT_STEPS_PER_MM,
             )
 
+        if interface == "usb":
+            conn = usb_index
+            conn_desc = f"USB index {usb_index}"
+        else:
+            conn = f"{host}:{tcp_port}"
+            conn_desc = f"{host}:{tcp_port}"
+
         logger.info(
-            "Connecting to Newport 8742 at %s:%d (X=axis%d, Y=axis%d)",
-            host, tcp_port, self._axis_x, self._axis_y,
+            "Connecting to Newport 8742 via %s (%s) (X=axis%d, Y=axis%d)",
+            interface, conn_desc, self._axis_x, self._axis_y,
         )
 
         try:
-            self._stage = Newport.Picomotor8742(conn=f"{host}:{tcp_port}")
+            self._stage = Newport.Picomotor8742(conn=conn)
         except Exception as exc:
+            if interface == "usb":
+                raise RuntimeError(
+                    f"Failed to connect to Newport 8742 over USB (index {usb_index}): {exc}\n"
+                    "Check: (1) Picomotor Application drivers installed? "
+                    "(2) status LED solid green? (3) correct usb_index if multiple "
+                    "controllers are connected?"
+                ) from exc
             raise RuntimeError(
                 f"Failed to connect to Newport 8742 at {host}:{tcp_port}: {exc}\n"
                 "Check: (1) IP address correct? (2) cable plugged in? "
@@ -345,7 +370,9 @@ def get_motion_controller(config: dict) -> MotionController:
     Config example:
         motion:
           controller: newport_8742
-          host: "192.168.100.2"
+          interface: ethernet   # or "usb"
+          host: "192.168.100.2"  # ethernet only
+          usb_index: 0            # usb only
           steps_per_mm_x: 500    # calibrate on-site
           steps_per_mm_y: 500    # calibrate on-site
     """
@@ -382,7 +409,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Newport 8742 smoke test and calibration helper"
     )
-    parser.add_argument("host", help="8742 IP address (e.g. 192.168.100.2)")
+    parser.add_argument("host", nargs="?", default=None,
+                        help="8742 IP address (e.g. 192.168.100.2); ignored if --usb is given")
+    parser.add_argument("--usb", action="store_true",
+                        help="Connect over USB instead of Ethernet")
+    parser.add_argument("--usb-index", type=int, default=0,
+                        help="USB enumeration index if multiple controllers are connected (default: 0)")
     parser.add_argument("--axis-x", type=int, default=1)
     parser.add_argument("--axis-y", type=int, default=2)
     parser.add_argument("--move-x", type=float, default=None,
@@ -397,10 +429,15 @@ if __name__ == "__main__":
                         help="Drive axis Y by N steps (measure beam displacement to get steps/mm)")
     args = parser.parse_args()
 
+    if not args.usb and args.host is None:
+        parser.error("host is required unless --usb is given")
+
     cfg = {
         "motion": {
             "controller": "newport_8742",
+            "interface": "usb" if args.usb else "ethernet",
             "host": args.host,
+            "usb_index": args.usb_index,
             "axis_x": args.axis_x,
             "axis_y": args.axis_y,
             "steps_per_mm_x": args.steps_per_mm_x,

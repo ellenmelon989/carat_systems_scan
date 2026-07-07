@@ -17,7 +17,9 @@ scan:
 
 motion:
   controller: newport_8742
-  host: "192.168.100.2"     # replace with actual IP
+  interface: usb            # "usb" or "ethernet"
+  host: "192.168.100.2"     # only used when interface: ethernet — replace with actual IP
+  usb_index: 0              # only used when interface: usb
   steps_per_mm_x: 500       # fill in after calibration
   steps_per_mm_y: 500       # fill in after calibration
   axis_x: 1
