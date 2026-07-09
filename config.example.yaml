@@ -8,7 +8,6 @@ scan:
     x_range_mm: [0, 50]
     y_range_mm: [0, 50]
   scan_order: raster   # raster | serpentine
-  dwell_time_s: 0.5
   settle_time_s: 0.5
   reference_point:
     enabled: true

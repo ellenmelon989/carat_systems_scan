@@ -12,6 +12,7 @@ path is set via config["output"]["oes_hdf5"] (optional); if absent,
 only CSV spectrum files are written.
 """
 
+import copy
 import csv
 import os
 import time
@@ -20,6 +21,34 @@ from typing import Optional
 
 import numpy as np
 import yaml
+
+# Substrings (case-insensitive) that mark a config key as sensitive.
+# Any dict key containing one of these has its value redacted before
+# the config is echoed into metadata.yaml.
+_SECRET_KEY_MARKERS = ("key", "token", "secret", "password")
+
+
+def _redact_secrets(obj):
+    """
+    Recursively deep-copy a config dict, replacing the value of any
+    key that looks like a credential (matches _SECRET_KEY_MARKERS)
+    with "***REDACTED***".
+
+    write_metadata() embeds the full run config into metadata.yaml for
+    provenance. Without this, credentials like ir.pac.api_key_value get
+    written in plaintext into every scan's output directory.
+    """
+    if isinstance(obj, dict):
+        redacted = {}
+        for key, value in obj.items():
+            if isinstance(key, str) and any(marker in key.lower() for marker in _SECRET_KEY_MARKERS):
+                redacted[key] = "***REDACTED***" if value else value
+            else:
+                redacted[key] = _redact_secrets(value)
+        return redacted
+    if isinstance(obj, list):
+        return [_redact_secrets(item) for item in obj]
+    return copy.deepcopy(obj)
 
 
 class DataLogger:
@@ -61,7 +90,7 @@ class DataLogger:
         """Write the scan metadata file (config + extra info)."""
         metadata = dict(self.config.get("metadata", {}))
         metadata["scan_started"] = datetime.now().isoformat()
-        metadata["config"] = self.config
+        metadata["config"] = _redact_secrets(self.config)
         if extra_metadata:
             metadata.update(extra_metadata)
 

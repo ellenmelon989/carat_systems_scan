@@ -1,0 +1,16 @@
+config:
+  ir:
+    pac:
+      api_key_id: carat_scanner
+      api_key_value: SUPERSECRET123
+      tag_name: foo
+  metadata:
+    operator: test
+  output:
+    base_dir: ./scan_data_redact_test
+    log_file: log.txt
+    metadata_file: metadata.yaml
+    spectra_subdir: spectra
+    summary_csv: s.csv
+operator: test
+scan_started: '2026-07-09T15:36:01.372235'
