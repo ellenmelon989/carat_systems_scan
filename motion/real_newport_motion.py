@@ -428,6 +428,13 @@ if __name__ == "__main__":
                         help="Move Y by this many mm (requires steps-per-mm-y)")
     parser.add_argument("--steps-per-mm-x", type=float, default=_DEFAULT_STEPS_PER_MM)
     parser.add_argument("--steps-per-mm-y", type=float, default=_DEFAULT_STEPS_PER_MM)
+    parser.add_argument("--move-velocity", type=int, default=_DEFAULT_MOVE_VELOCITY,
+                        help=(
+                            "steps/s to run moves AND calibration at (default: %(default)d). "
+                            "Open-loop step size is velocity-dependent — calibration is only "
+                            "valid for the velocity it was measured at. Always pass the same "
+                            "value your config.yaml uses for motion.move_velocity."
+                        ))
     parser.add_argument("--calibrate-x", type=int, default=None,
                         help="Drive axis X by N steps (measure beam displacement to get steps/mm)")
     parser.add_argument("--calibrate-y", type=int, default=None,
@@ -448,22 +455,39 @@ if __name__ == "__main__":
             "steps_per_mm_x": args.steps_per_mm_x,
             "steps_per_mm_y": args.steps_per_mm_y,
             "hard_home": False,   # soft home for smoke test — safer
+            "move_velocity": args.move_velocity,
         }
     }
 
     with NewportPicomotorController(cfg) as mc:
 
         if args.calibrate_x is not None:
-            print(f"Calibration: moving axis {args.axis_x} by {args.calibrate_x} steps...")
+            print(f"Calibration: moving axis {args.axis_x} by {args.calibrate_x} steps "
+                  f"at {args.move_velocity} steps/s...")
+            print("NOTE: this must match motion.move_velocity in config.yaml, since open-loop "
+                  "step size is velocity-dependent. Pass --move-velocity to match if it differs "
+                  "from the default.")
             mc._stage.move_by(axis=args.axis_x, steps=args.calibrate_x)
             mc._wait_move(args.axis_x, 30, "calibrate X")
             print(f"Done. Measure beam displacement in mm, then: steps_per_mm_x = {args.calibrate_x} / measured_mm")
+            print("Repeat this run 3-5x in the same direction and average the result — "
+                  "single-shot measurements are noisy on an open-loop inertial drive. "
+                  "Record the velocity, direction, and date in config.yaml's "
+                  "calibration_velocity_sps / calibration_direction / calibration_date fields.")
 
         elif args.calibrate_y is not None:
-            print(f"Calibration: moving axis {args.axis_y} by {args.calibrate_y} steps...")
+            print(f"Calibration: moving axis {args.axis_y} by {args.calibrate_y} steps "
+                  f"at {args.move_velocity} steps/s...")
+            print("NOTE: this must match motion.move_velocity in config.yaml, since open-loop "
+                  "step size is velocity-dependent. Pass --move-velocity to match if it differs "
+                  "from the default.")
             mc._stage.move_by(axis=args.axis_y, steps=args.calibrate_y)
             mc._wait_move(args.axis_y, 30, "calibrate Y")
             print(f"Done. Measure beam displacement in mm, then: steps_per_mm_y = {args.calibrate_y} / measured_mm")
+            print("Repeat this run 3-5x in the same direction and average the result — "
+                  "single-shot measurements are noisy on an open-loop inertial drive. "
+                  "Record the velocity, direction, and date in config.yaml's "
+                  "calibration_velocity_sps / calibration_direction / calibration_date fields.")
 
         else:
             print("=== Homing (soft) ===")

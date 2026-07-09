@@ -97,10 +97,25 @@ class ScanManager:
         ref_every = ref_cfg.get("revisit_every_n_points", 0)
         ref_position = tuple(ref_cfg.get("position", (0.0, 0.0)))
 
+        # Periodic re-home: the Newport picomotors are open-loop (no encoder),
+        # so absolute position error accumulates with step count over a long
+        # scan. Re-homing every N points resets that error to zero at known
+        # intervals instead of letting it drift for the whole scan. Disabled
+        # by default — opt in via scan.rehome in config.yaml.
+        rehome_cfg = self.scan_cfg.get("rehome", {})
+        rehome_enabled = rehome_cfg.get("enabled", False)
+        rehome_every = rehome_cfg.get("every_n_points", 0)
+
         point_id = 0
         for ix, iy, x, y in points:
             self._measure_point(point_id, ix, iy, x, y)
             point_id += 1
+
+            if rehome_enabled and rehome_every > 0 and point_id % rehome_every == 0:
+                self.logger.log_event(
+                    f"Re-homing after point {point_id} (open-loop drift reset)"
+                )
+                self.motion.home()
 
             if ref_enabled and ref_every > 0 and point_id % ref_every == 0:
                 self.logger.log_event(f"Revisiting reference point {ref_position} "

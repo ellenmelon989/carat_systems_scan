@@ -14,6 +14,12 @@ scan:
     enabled: true
     revisit_every_n_points: 25
     position: [0, 0]  # placeholder
+  rehome:
+    # Re-homes the motion axes periodically to reset open-loop position
+    # drift (Newport picomotors have no encoder — error accumulates with
+    # step count). Off by default; enable for long/high-point-count scans.
+    enabled: false
+    every_n_points: 200
 
 motion:
   controller: newport_8742
@@ -22,6 +28,13 @@ motion:
   usb_index: 0              # only used when interface: usb
   steps_per_mm_x: 500       # fill in after calibration
   steps_per_mm_y: 500       # fill in after calibration
+  # Calibration must be run at move_velocity below (open-loop step size is
+  # velocity-dependent) — re-run calibration if move_velocity changes.
+  calibration_date: null           # fill in: date steps_per_mm was measured
+  calibration_velocity_sps: null   # fill in: velocity used during calibration (should match move_velocity)
+  calibration_direction: null      # fill in: "+x"/"-x"/"+y"/"-y" — hysteresis makes direction matter
+  home_velocity: 200        # steps/s during homing (slow, avoids crashing into hard stop)
+  move_velocity: 2000       # steps/s during scan moves — calibrate steps_per_mm at THIS velocity
   axis_x: 1
   axis_y: 2
   homing_required: true
