@@ -222,9 +222,9 @@ class NewportPicomotorController(MotionController):
             self._hard_home_axis(self._axis_y, label="Y")
         else:
             logger.info("Soft-homing X (axis %d): zeroing counter in place", self._axis_x)
-            self._stage.set_position(axis=self._axis_x, position=0)
+            self._stage.set_position_reference(axis=self._axis_x, position=0)
             logger.info("Soft-homing Y (axis %d): zeroing counter in place", self._axis_y)
-            self._stage.set_position(axis=self._axis_y, position=0)
+            self._stage.set_position_reference(axis=self._axis_y, position=0)
 
         self._origin_x = self._stage.get_position(axis=self._axis_x)
         self._origin_y = self._stage.get_position(axis=self._axis_y)
@@ -327,7 +327,7 @@ class NewportPicomotorController(MotionController):
         # Wait for motion to stop (stall at hard stop or steps exhaust)
         self._wait_move(axis, self._home_timeout, label=f"Home {label}")
         # Zero the counter here = define this as the origin
-        self._stage.set_position(axis=axis, position=0)
+        self._stage.set_position_reference(axis=axis, position=0)
         logger.info("%s axis homed and zeroed.", label)
         # Restore normal velocity for scan moves
         self._set_velocity(axis, self._move_velocity)
