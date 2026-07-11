@@ -3,11 +3,15 @@
 
 scan:
   grid:
-    nx: 21          # points in X
-    ny: 21          # points in Y
-    x_range_mm: [0, 50]
-    y_range_mm: [0, 50]
+    x_range_mm: [0, 50]      # scan area boundary — set by calibrate_scan_area.py (jog to edges)
+    y_range_mm: [0, 50]      # scan area boundary — set by calibrate_scan_area.py (jog to edges)
+    wafer_center_mm: [25.0, 25.0]   # derived by calibrate_scan_area.py from the 4 edge positions
+    step_size_mm: 2.0        # grid spacing in mm; valid range 1-11mm (see scan_params.py).
+                              # nx/ny are DERIVED from this + the range above at scan time —
+                              # not set directly. A zero-width range on one axis collapses
+                              # that axis to a single point (line/point scan), automatically.
   scan_order: raster   # raster | serpentine
+  dwell_time_s: 8.0     # per-point IR averaging duration; valid range 2-22s (see scan_params.py)
   settle_time_s: 0.5
   reference_point:
     enabled: true
@@ -50,7 +54,7 @@ ir:
     tag_name: "iai_PYRO_TEMP"      # confirm via PAC Display Basic
     api_key_id: "carat_scanner"
     api_key_value: ""
-  averaging_time_s: 5.0
+  # averaging_time_s removed — superseded by scan.dwell_time_s (single operator-facing knob)
   units: C
 
 oes:

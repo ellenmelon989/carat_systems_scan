@@ -17,6 +17,7 @@ from readers.ir_reader_base import get_ir_reader
 from readers.spectrometer_reader_base import get_spectrometer_reader
 from data_logger import DataLogger, build_point_record
 from oes_store import OESStore
+from scan_params import grid_dims_from_range, validate_dwell_time_s
 
 
 def generate_grid(scan_cfg):
@@ -24,13 +25,19 @@ def generate_grid(scan_cfg):
     Generate a list of (ix, iy, x_mm, y_mm) points based on config,
     in raster or serpentine order.
 
+    Grid point counts (nx, ny) are DERIVED from the edge-calibrated scan
+    range (scan.grid.x_range_mm / y_range_mm — set by calibrate_scan_area.py)
+    and the operator-set step_size_mm; they are not stored directly in
+    config. See scan_params.grid_dims_from_range().
+
     ix, iy are 0-based grid indices used to address the HDF5 dataset;
     x_mm, y_mm are the physical positions in millimetres.
     """
-    nx = scan_cfg["grid"]["nx"]
-    ny = scan_cfg["grid"]["ny"]
     x0, x1 = scan_cfg["grid"]["x_range_mm"]
     y0, y1 = scan_cfg["grid"]["y_range_mm"]
+    step_size_mm = scan_cfg["grid"]["step_size_mm"]
+
+    nx, ny = grid_dims_from_range((x0, x1), (y0, y1), step_size_mm)
 
     xs = np.linspace(x0, x1, nx)
     ys = np.linspace(y0, y1, ny)
@@ -72,6 +79,11 @@ class ScanManager:
         self.ir_cfg = config["ir"]
         self.oes_cfg = config["oes"]
         self.error_cfg = config["error_policy"]
+
+        # dwell_time_s is the single operator-facing per-point IR averaging
+        # duration (replaces the old ir.averaging_time_s config key — see
+        # scan_params.py for the valid range).
+        self.dwell_time_s = validate_dwell_time_s(self.scan_cfg["dwell_time_s"])
 
         # Build OESStore from grid coords so it's ready before the scan starts.
         # Wavelength dimension is initialized lazily on first write_point().
@@ -169,7 +181,7 @@ class ScanManager:
         max_retries = self.error_cfg["max_retries"]
         for attempt in range(max_retries + 1):
             try:
-                value, _ = self.ir_reader.read_averaged(self.ir_cfg["averaging_time_s"])
+                value, _ = self.ir_reader.read_averaged(self.dwell_time_s)
                 return {"value": value, "error": False}
             except Exception as e:
                 self.logger.log_event(f"IR read failed (attempt {attempt + 1}): {e}")
@@ -197,13 +209,19 @@ if __name__ == "__main__":
     with open("config.yaml") as f:
         config = yaml.safe_load(f)
 
-    # Fast params for smoke test — override slow real-scan values
-    config["scan"]["grid"]["nx"] = 3
-    config["scan"]["grid"]["ny"] = 3
+    # Fast params for smoke test — override slow real-scan values.
+    # Grid is now derived from range + step size (not nx/ny directly), so
+    # shrink the range to get a small 3x3 grid at the default 2mm step size.
+    # dwell_time_s is kept at its validated minimum (2.0s) rather than
+    # bypassing validation like the old 0.2s override did — smoke test runs
+    # a bit slower (~2s/point) but exercises the real, enforced bounds.
+    config["scan"]["grid"]["x_range_mm"] = [0, 4]
+    config["scan"]["grid"]["y_range_mm"] = [0, 4]
+    config["scan"]["grid"]["step_size_mm"] = 2.0
+    config["scan"]["dwell_time_s"] = 2.0
     config["scan"]["settle_time_s"] = 0.0
     config["scan"]["reference_point"]["enabled"] = True
     config["scan"]["reference_point"]["revisit_every_n_points"] = 4
-    config["ir"]["averaging_time_s"] = 0.2   # 5s → 0.2s for smoke test
     config["output"]["base_dir"] = "./scan_data_smoketest"
 
     manager = ScanManager(config)

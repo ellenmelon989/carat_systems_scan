@@ -44,6 +44,23 @@ class MotionController(ABC):
         if not (limits["y_min_mm"] <= y_mm <= limits["y_max_mm"]):
             raise ValueError(f"Y position {y_mm} outside limits {limits['y_min_mm']}-{limits['y_max_mm']}")
 
+    def jog(self, dx_mm: float = 0.0, dy_mm: float = 0.0):
+        """
+        Relative move by (dx_mm, dy_mm) from the current position.
+
+        Built on top of get_position()/move_to(), so every MotionController
+        subclass gets it for free. Used by the interactive edge-calibration
+        workflow (see calibrate_scan_area.py) where the operator jogs the
+        aim spot to the wafer edges to define the scan area — deliberately
+        NOT clamped by motion.soft_limits, since that calibration process is
+        what defines the safe area in the first place. The physical hard
+        stops are the only real limit while jogging; the operator watches
+        the mirror.
+        """
+        x, y = self.get_position()
+        self.move_to(x + dx_mm, y + dy_mm)
+        self.wait_for_settle(0.0)
+
 
 class MockMotionController(MotionController):
     """
