@@ -76,7 +76,6 @@ class ScanManager:
         self.spectrometer = get_spectrometer_reader(config)
 
         self.scan_cfg = config["scan"]
-        self.ir_cfg = config["ir"]
         self.oes_cfg = config["oes"]
         self.error_cfg = config["error_policy"]
 
@@ -204,25 +203,46 @@ class ScanManager:
 
 
 if __name__ == "__main__":
+    import argparse
     import yaml
 
-    with open("config.yaml") as f:
+    parser = argparse.ArgumentParser(
+        description="Run a carat_scanner scan using the settings in config.yaml."
+    )
+    parser.add_argument(
+        "--config", default="config.yaml",
+        help="Path to the config YAML to run (default: config.yaml).",
+    )
+    parser.add_argument(
+        "--smoke-test", action="store_true",
+        help=(
+            "Run a fast, small-grid dev sanity check INSTEAD of the "
+            "configured scan: shrinks the range to a 3x3 grid at the "
+            "default step size, uses the minimum valid dwell time (2s), "
+            "and writes to ./scan_data_smoketest instead of the configured "
+            "output dir. Does not modify config.yaml on disk. Without this "
+            "flag, `python scan_manager.py` runs exactly what's in "
+            "config.yaml — no silent overrides."
+        ),
+    )
+    args = parser.parse_args()
+
+    with open(args.config) as f:
         config = yaml.safe_load(f)
 
-    # Fast params for smoke test — override slow real-scan values.
-    # Grid is now derived from range + step size (not nx/ny directly), so
-    # shrink the range to get a small 3x3 grid at the default 2mm step size.
-    # dwell_time_s is kept at its validated minimum (2.0s) rather than
-    # bypassing validation like the old 0.2s override did — smoke test runs
-    # a bit slower (~2s/point) but exercises the real, enforced bounds.
-    config["scan"]["grid"]["x_range_mm"] = [0, 4]
-    config["scan"]["grid"]["y_range_mm"] = [0, 4]
-    config["scan"]["grid"]["step_size_mm"] = 2.0
-    config["scan"]["dwell_time_s"] = 2.0
-    config["scan"]["settle_time_s"] = 0.0
-    config["scan"]["reference_point"]["enabled"] = True
-    config["scan"]["reference_point"]["revisit_every_n_points"] = 4
-    config["output"]["base_dir"] = "./scan_data_smoketest"
+    if args.smoke_test:
+        # Dev-only override, opt-in via --smoke-test. dwell_time_s is kept
+        # at its validated minimum (2.0s) rather than bypassing validation
+        # entirely — smoke test runs a bit slower (~2s/point) but exercises
+        # the real, enforced bounds instead of a fake fast value.
+        config["scan"]["grid"]["x_range_mm"] = [0, 4]
+        config["scan"]["grid"]["y_range_mm"] = [0, 4]
+        config["scan"]["grid"]["step_size_mm"] = 2.0
+        config["scan"]["dwell_time_s"] = 2.0
+        config["scan"]["settle_time_s"] = 0.0
+        config["scan"]["reference_point"]["enabled"] = True
+        config["scan"]["reference_point"]["revisit_every_n_points"] = 4
+        config["output"]["base_dir"] = "./scan_data_smoketest"
 
     manager = ScanManager(config)
     manager.run()

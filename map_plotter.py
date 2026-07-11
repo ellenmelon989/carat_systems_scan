@@ -100,7 +100,11 @@ def generate_all_maps(config):
                  os.path.join(maps_dir, "total_intensity_map.png"),
                  cmap="viridis", label="Summed Intensity (a.u.)")
 
-    # Example spectral ratio map: C2 Swan / H-alpha (adjust as needed)
+    # Example spectral ratio map: C2 Swan / H-alpha (adjust as needed).
+    # Hardcoded to these two exact feature names — if oes.features in
+    # config.yaml doesn't define both, this is skipped. Made that skip
+    # loud on purpose (2026-07-11): it used to fail silently with no
+    # indication the ratio map was ever expected.
     if "feature_C2_Swan" in df.columns and "feature_H_alpha" in df.columns:
         with np.errstate(divide="ignore", invalid="ignore"):
             df["ratio_C2_Halpha"] = df["feature_C2_Swan"] / df["feature_H_alpha"]
@@ -108,6 +112,15 @@ def generate_all_maps(config):
         plot_map(xs, ys, grid, "C2 Swan / H-alpha Ratio",
                  os.path.join(maps_dir, "ratio_C2_Halpha_map.png"),
                  cmap="coolwarm", label="Ratio")
+    else:
+        print(
+            "NOTE: skipping C2 Swan / H-alpha ratio map — expected columns "
+            "'feature_C2_Swan' and 'feature_H_alpha' not found in "
+            "scan_summary.csv. This ratio is hardcoded in "
+            "generate_all_maps() to those two feature names; if "
+            "oes.features in config.yaml uses different names (or omits "
+            "one of these), this map is intentionally skipped, not broken."
+        )
 
 
 if __name__ == "__main__":

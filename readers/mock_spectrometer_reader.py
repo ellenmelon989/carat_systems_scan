@@ -12,11 +12,11 @@ from typing import Optional
 import numpy as np
 
 try:
-    from .spectrometer_reader_base import SpectrometerReader, SpectrumReading
+    from .spectrometer_reader_base import SpectrometerReader, SpectrumReading, boxcar_smooth
 except ImportError:
     # Fallback for running this file directly (e.g. python mock_spectrometer_reader.py),
     # where relative imports don't work because there's no parent package.
-    from spectrometer_reader_base import SpectrometerReader, SpectrumReading
+    from spectrometer_reader_base import SpectrometerReader, SpectrumReading, boxcar_smooth
 
 
 class MockSpectrometerReader(SpectrometerReader):
@@ -45,8 +45,7 @@ class MockSpectrometerReader(SpectrometerReader):
         spectrum = np.clip(spectrum, 0, self._max_intensity)
 
         if self.boxcar_width > 0:
-            kernel = np.ones(2 * self.boxcar_width + 1) / (2 * self.boxcar_width + 1)
-            spectrum = np.convolve(spectrum, kernel, mode='same')
+            spectrum = boxcar_smooth(spectrum, self.boxcar_width)
 
         saturated = bool(np.max(spectrum) >= self._max_intensity)
 

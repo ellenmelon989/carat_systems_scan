@@ -362,45 +362,11 @@ class NewportPicomotorController(MotionController):
 
 
 # ---------------------------------------------------------------------------
-# Factory integration
-# ---------------------------------------------------------------------------
-
-def get_motion_controller(config: dict) -> MotionController:
-    """
-    Extended factory — handles newport_8742 and mock.
-
-    Drop-in replacement for get_motion_controller() in motion_controller.py,
-    or call from there (see motion_controller.py factory function).
-
-    Config example:
-        motion:
-          controller: newport_8742
-          interface: ethernet   # or "usb"
-          host: "192.168.100.2"  # ethernet only
-          usb_index: 0            # usb only
-          steps_per_mm_x: 500    # calibrate on-site
-          steps_per_mm_y: 500    # calibrate on-site
-    """
-    from .motion_controller import MockMotionController
-
-    motion_cfg = config.get("motion", {})
-    controller_type = motion_cfg.get("controller")
-
-    if controller_type is None:
-        logger.info("No controller configured — using MockMotionController")
-        return MockMotionController()
-
-    if controller_type == "newport_8742":
-        return NewportPicomotorController(config)
-
-    raise ValueError(
-        f"Unknown motion controller type: '{controller_type}'. "
-        "Supported: newport_8742 | null (mock)"
-    )
-
-
-# ---------------------------------------------------------------------------
 # CLI: connection smoke test + calibration helper
+#
+# Note: the factory function that picks Mock vs. NewportPicomotorController
+# lives in motion_controller.py (get_motion_controller) — that's the only
+# copy. scan_manager.py and calibrate_scan_area.py both import from there.
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":

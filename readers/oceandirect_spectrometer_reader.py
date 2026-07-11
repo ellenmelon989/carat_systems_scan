@@ -96,6 +96,9 @@ class OceanDirectSpectrometerReader(SpectrometerReader):
             #       frame = np.array(self._device.get_corrected_spectrum())
             #       accum = frame.copy() if accum is None else accum + frame
             #   intensities = accum / self.num_averages
+            #   if self.boxcar_width > 0:
+            #       from .spectrometer_reader_base import boxcar_smooth
+            #       intensities = boxcar_smooth(intensities, self.boxcar_width)
             raise NotImplementedError("OceanDirect read() not yet implemented.")
         except Exception as e:
             return SpectrumReading(
@@ -104,12 +107,6 @@ class OceanDirectSpectrometerReader(SpectrometerReader):
                 num_averages=self.num_averages, boxcar_width=self.boxcar_width,
                 saturated=False, timestamp=timestamp, error=str(e),
             )
-
-    @staticmethod
-    def _boxcar_smooth(intensities: np.ndarray, width: int) -> np.ndarray:
-        """Centered moving average across `width` adjacent points each side."""
-        kernel = np.ones(2 * width + 1) / (2 * width + 1)
-        return np.convolve(intensities, kernel, mode='same')
 
     def close(self):
         if self._device is not None:

@@ -26,11 +26,11 @@ from typing import Optional
 import numpy as np
 
 try:
-    from .spectrometer_reader_base import SpectrometerReader, SpectrumReading
+    from .spectrometer_reader_base import SpectrometerReader, SpectrumReading, boxcar_smooth
 except ImportError:
     # Fallback for running this file directly (e.g. python pyseabreeze_spectrometer_reader.py),
     # where relative imports don't work because there's no parent package.
-    from spectrometer_reader_base import SpectrometerReader, SpectrumReading
+    from spectrometer_reader_base import SpectrometerReader, SpectrumReading, boxcar_smooth
 
 
 class PySeabreezeSpectrometerReader(SpectrometerReader):
@@ -80,7 +80,7 @@ class PySeabreezeSpectrometerReader(SpectrometerReader):
             intensities = accum / self.num_averages
 
             if self.boxcar_width > 0:
-                intensities = self._boxcar_smooth(intensities, self.boxcar_width)
+                intensities = boxcar_smooth(intensities, self.boxcar_width)
 
             saturated = bool(np.max(intensities) >= self._max_intensity)
 
@@ -100,12 +100,6 @@ class PySeabreezeSpectrometerReader(SpectrometerReader):
                 num_averages=self.num_averages, boxcar_width=self.boxcar_width,
                 saturated=False, timestamp=timestamp, error=str(e),
             )
-
-    @staticmethod
-    def _boxcar_smooth(intensities: np.ndarray, width: int) -> np.ndarray:
-        """Centered moving average across `width` adjacent points each side."""
-        kernel = np.ones(2 * width + 1) / (2 * width + 1)
-        return np.convolve(intensities, kernel, mode='same')
 
     def close(self):
         if self.spec:

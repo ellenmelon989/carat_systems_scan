@@ -38,6 +38,22 @@ class SpectrometerReader:
         pass
 
 
+def boxcar_smooth(intensities: np.ndarray, width: int) -> np.ndarray:
+    """
+    Centered moving-average smoothing across `width` adjacent points on
+    each side (a (2*width + 1)-wide boxcar). width <= 0 returns the input
+    unchanged.
+
+    Shared by every spectrometer backend (pyseabreeze, oceandirect, mock)
+    so there's one definition of "boxcar smoothing" instead of one
+    copy-pasted into each backend file.
+    """
+    if width <= 0:
+        return intensities
+    kernel = np.ones(2 * width + 1) / (2 * width + 1)
+    return np.convolve(intensities, kernel, mode="same")
+
+
 def get_spectrometer_reader(config) -> "SpectrometerReader":
     """
     Factory. Returns the appropriate SpectrometerReader based on

@@ -209,17 +209,23 @@ def _patch_scalar(text: str, key: str, new_value: str) -> str:
     return pattern.sub(_replace, text, count=1)
 
 
-def write_results(config_path: Path, area: dict, step_size_mm: float, dwell_time_s: float):
+def write_results(config_path: Path, results: dict):
+    """
+    Patch config.yaml with the calibration results.
+
+    `results` maps config key -> value for x_range_mm, y_range_mm,
+    wafer_center_mm (each a [lo, hi] pair), plus step_size_mm and
+    dwell_time_s (scalars) — one dict for everything this tool produces,
+    rather than area/step_size/dwell_time as separate parameters.
+    """
     text = config_path.read_text()
 
-    text = _patch_scalar(text, "x_range_mm",
-                          f"[{area['x_range_mm'][0]:.4f}, {area['x_range_mm'][1]:.4f}]")
-    text = _patch_scalar(text, "y_range_mm",
-                          f"[{area['y_range_mm'][0]:.4f}, {area['y_range_mm'][1]:.4f}]")
-    text = _patch_scalar(text, "wafer_center_mm",
-                          f"[{area['wafer_center_mm'][0]:.4f}, {area['wafer_center_mm'][1]:.4f}]")
-    text = _patch_scalar(text, "step_size_mm", f"{step_size_mm}")
-    text = _patch_scalar(text, "dwell_time_s", f"{dwell_time_s}")
+    for key in ("x_range_mm", "y_range_mm", "wafer_center_mm"):
+        lo, hi = results[key]
+        text = _patch_scalar(text, key, f"[{lo:.4f}, {hi:.4f}]")
+
+    text = _patch_scalar(text, "step_size_mm", f"{results['step_size_mm']}")
+    text = _patch_scalar(text, "dwell_time_s", f"{results['dwell_time_s']}")
 
     config_path.write_text(text)
     print(f"\nWrote calibration results to {config_path}")
@@ -279,7 +285,10 @@ def main():
         print("Not written. Re-run to try again.")
         return
 
-    write_results(config_path, area, step_size_mm, dwell_time_s)
+    results = dict(area)
+    results["step_size_mm"] = step_size_mm
+    results["dwell_time_s"] = dwell_time_s
+    write_results(config_path, results)
 
 
 if __name__ == "__main__":

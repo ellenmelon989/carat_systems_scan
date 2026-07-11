@@ -48,7 +48,10 @@ motion:
     y_max_mm: 50
 
 ir:
-  source: pac          # pac | direct
+  source: pac          # pac | mock — REST/PAC is the only real backend wired up
+                        # (direct-tap/OptoMMP fallbacks exist as prototypes in the
+                        # older "carat system" folder but aren't ported in here;
+                        # decided 2026-07-11 that we only need REST for now)
   pac:
     ip: ""           # confirm on-site
     tag_name: "iai_PYRO_TEMP"      # confirm via PAC Display Basic

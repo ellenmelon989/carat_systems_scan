@@ -6,10 +6,17 @@ and error logs. Designed to be crash-safe: each point's data is
 written to disk immediately (append-only), so a scan that dies
 partway through preserves all completed points.
 
-If an OESStore is provided at construction, full spectra are written
-to HDF5 instead of (or in addition to) per-point CSV files. The HDF5
-path is set via config["output"]["oes_hdf5"] (optional); if absent,
-only CSV spectrum files are written.
+KNOWN REDUNDANCY (intentional for now, flagged 2026-07-11 code review):
+ScanManager always builds an OESStore, so in practice every spectrum
+is written BOTH to a per-point CSV (spectra/point_XXXXX.csv, via
+_write_spectrum) AND into the HDF5 store (write_point below) — not
+"instead of," always "in addition to," despite what the paragraph
+below might imply. That's 2x disk I/O and 2x storage for the same
+data on every point of every scan. Deliberately left as-is for now;
+HDF5 is almost certainly the one to keep long-term (it preserves the
+full x/y/wavelength grid and loads straight into xarray — see
+oes_store.py), so when this gets revisited, drop the per-point CSVs
+rather than the HDF5 store, once nothing downstream still reads them.
 """
 
 import copy
