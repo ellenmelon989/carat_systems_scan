@@ -340,7 +340,7 @@ def write_results(config_path: Path, results: dict):
     bound) — both optional scalars, patched the same way as everything
     else, one dict in rather than separate parameters.
     """
-    text = config_path.read_text()
+    text = config_path.read_text(encoding="utf-8-sig")
 
     for key in ("x_range_mm", "y_range_mm", "wafer_center_mm"):
         lo, hi = results[key]
@@ -357,7 +357,7 @@ def write_results(config_path: Path, results: dict):
     if "home_steps" in results:
         text = _patch_scalar(text, "home_steps", f"{results['home_steps']}")
 
-    config_path.write_text(text)
+    config_path.write_text(text, encoding="utf-8")
     print(f"\nWrote calibration results to {config_path}")
 
 
@@ -367,7 +367,7 @@ def write_results(config_path: Path, results: dict):
 
 def main():
     config_path = Path(sys.argv[1] if len(sys.argv) > 1 else "config.yaml")
-    config = yaml.safe_load(config_path.read_text())
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8-sig"))
 
     print("=" * 60)
     print("SCANNER AREA CALIBRATION")
