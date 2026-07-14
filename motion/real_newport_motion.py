@@ -108,7 +108,7 @@ _DEFAULT_HOME_STEPS = 100_000      # large enough to always reach the hard stop
 _DEFAULT_HOME_VELOCITY = 200       # steps/s — slow for safety at hard stop
 _DEFAULT_MOVE_VELOCITY = 2000      # steps/s — tune for speed vs. vibration
 _DEFAULT_HOME_TIMEOUT = 60.0
-_DEFAULT_MOVE_TIMEOUT = 30.0
+_DEFAULT_MOVE_TIMEOUT = 60.0
 
 
 class NewportPicomotorController(MotionController):
