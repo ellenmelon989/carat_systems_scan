@@ -234,6 +234,60 @@ class NewportPicomotorController(MotionController):
             self._origin_x, self._origin_y,
         )
 
+    def resume(self):
+        """
+        Mark this controller ready to move WITHOUT re-homing — for a
+        fresh process (e.g. scan_manager.py) picking up right after a
+        previous process (e.g. calibrate_scan_area.py) already called
+        home() and jogged around, in the same physical session.
+
+        hard_home=True: just calls home() — idempotent, always drives
+        back to the same mechanical stop, so there's no real
+        distinction from resuming.
+
+        hard_home=False: does NOT call set_position_reference() again
+        (that's what real home() does, and it's destructive here — it
+        would zero at wherever the stage happens to be right now,
+        discarding the previous process's origin rather than
+        restoring it). Instead just sets _homed=True and leaves
+        _origin_x/_origin_y at their __init__ default of 0.
+
+        Why 0 is correct, not just "not obviously wrong": home() sets
+        _origin_x/_origin_y by reading the position back from the 8742
+        immediately after zeroing it (lines above), and a step counter
+        reads exactly 0 immediately after being told "you are 0" — so
+        _origin_x/_origin_y ARE 0 right after any real home() call.
+        Leaving this fresh object's origin at its 0 default reproduces
+        that state exactly, provided the 8742's own position register
+        (not this Python object) is what's authoritative and it hasn't
+        been re-zeroed or the controller power-cycled since the last
+        real home().
+
+        CAVEAT — not independently verified against this specific
+        pylablib version / 8742 firmware: this assumes
+        set_position_reference() writes to a register that lives on
+        the controller itself and persists across a fresh serial/USB
+        connection, rather than being a pylablib-side, connection-
+        scoped offset that resets when this process reconnects. Most
+        real motion controllers work the former way (that's the whole
+        point of a hardware "zero" command), but if position readings
+        look wrong after using resume() instead of home(), this
+        assumption is the first thing to check — e.g. by comparing
+        get_position() right after connecting fresh vs. what it was
+        at the end of the previous process, before commanding any
+        move.
+        """
+        if self._hard_home:
+            self.home()
+        else:
+            self._homed = True
+            logger.info(
+                "Resuming (soft home) without re-zeroing: trusting the "
+                "8742's own position register still reflects the last "
+                "real home(). Origin left at (0, 0), matching what "
+                "home() would set it to right after zeroing."
+            )
+
     def move_to(self, x_mm: float, y_mm: float):
         """
         Absolute move to (x_mm, y_mm) in scan-grid coordinates.

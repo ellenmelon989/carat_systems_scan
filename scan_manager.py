@@ -95,6 +95,44 @@ class ScanManager:
 
         self.logger = DataLogger(config, store=self.store)
 
+    def _safe_rehome(self, context: str):
+        """
+        Call motion.home() only when it's actually safe to; otherwise
+        resume() without re-zeroing.
+
+        hard_home=True is idempotent: it always drives back to the same
+        physical mechanical stop, so calling it again mid-session (scan
+        start, periodic drift-reset) just resets accumulated open-loop
+        error to zero at a known-good origin. Safe anytime — resume()
+        just calls home() in this case, so behavior is unchanged.
+
+        hard_home=False is NOT idempotent: home() just labels wherever
+        the stage physically is *right now* as zero. calibrate_scan_area.py
+        already called it once, before jogging to the edges, and every
+        x_range_mm/y_range_mm/etc. value it wrote is relative to THAT
+        origin. Calling home() again here -- at scan start, or worse,
+        mid-scan during a periodic rehome -- would re-zero at wherever
+        the stage happens to be at that moment (the last calibration
+        edge jogged to, or some arbitrary grid point mid-scan) instead
+        of restoring the calibration's origin, silently invalidating
+        the whole scan rather than "resetting drift". So in this case
+        we call motion.resume() instead: it marks the controller ready
+        to move (needed — move_to() refuses to move until _homed is
+        True in THIS process, even though the physical origin is still
+        valid from the previous process's home() call) without
+        re-zeroing anything. See NewportPicomotorController.resume()
+        for exactly what it assumes and how to verify that assumption.
+        """
+        if self.config.get("motion", {}).get("hard_home", True):
+            self.motion.home()
+        else:
+            self.logger.log_event(
+                f"Soft home ({context}): resuming without re-zeroing — "
+                "calling home() again here would re-zero at the current "
+                "position instead of restoring the calibration's origin."
+            )
+            self.motion.resume()
+
     def run(self, on_point=None, stop_event=None):
         """
         on_point: optional callback(record: dict) -> None, invoked after each
@@ -113,7 +151,7 @@ class ScanManager:
         self.logger.write_metadata()
         self.logger.log_event("Scan started")
 
-        self.motion.home()
+        self._safe_rehome("scan start")
         self.spectrometer.set_integration_time(self.oes_cfg["integration_time_us"])
 
         points, _, _ = generate_grid(self.scan_cfg)
@@ -144,7 +182,7 @@ class ScanManager:
                 self.logger.log_event(
                     f"Re-homing after point {point_id} (open-loop drift reset)"
                 )
-                self.motion.home()
+                self._safe_rehome(f"periodic rehome after point {point_id}")
 
             if ref_enabled and ref_every > 0 and point_id % ref_every == 0:
                 self.logger.log_event(f"Revisiting reference point {ref_position} "

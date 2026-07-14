@@ -44,6 +44,22 @@ class MotionController(ABC):
         if not (limits["y_min_mm"] <= y_mm <= limits["y_max_mm"]):
             raise ValueError(f"Y position {y_mm} outside limits {limits['y_min_mm']}-{limits['y_max_mm']}")
 
+    def resume(self):
+        """
+        Mark the controller ready to move without re-homing, for a
+        process continuing after a previous home() rather than starting
+        fresh (e.g. scan_manager.py picking up right after
+        calibrate_scan_area.py already homed and jogged).
+
+        Default: just calls home(). Safe for controllers where "resume"
+        and "home" are the same thing (the mock, or real hardware in
+        hard_home mode, where home() is idempotent anyway).
+        NewportPicomotorController overrides this for soft-home mode,
+        where re-calling home() would be destructive rather than a
+        no-op — see its docstring.
+        """
+        self.home()
+
     def jog(self, dx_mm: float = 0.0, dy_mm: float = 0.0):
         """
         Relative move by (dx_mm, dy_mm) from the current position.
