@@ -37,6 +37,17 @@ motion:
   calibration_velocity_sps: null   # fill in: velocity used during calibration (should match move_velocity)
   calibration_direction: null      # fill in: "+x"/"-x"/"+y"/"-y" — hysteresis makes direction matter
   home_velocity: 200        # steps/s during homing (slow, avoids crashing into hard stop)
+  home_steps: 100000         # max steps driven toward the hard stop during a hard home.
+                              # Blind guess for now — calibrate_scan_area.py can suggest a
+                              # tighter, calibration-derived bound once steps_per_mm_x/y
+                              # (below) are for real, not the placeholder.
+  home_timeout_s: 300        # bumped from the 60s code default (2026-07-11): at
+                              # home_velocity=200 steps/s, 60s only covers 12,000 steps —
+                              # less than home_steps=100000 — so home() was timing out
+                              # before ever reaching the real hard stop. 300s gives ~60,000
+                              # steps of headroom at this velocity. Once steps_per_mm and
+                              # home_steps are calibrated for real, both this and
+                              # home_velocity can likely come back down.
   move_velocity: 2000       # steps/s during scan moves — calibrate steps_per_mm at THIS velocity
   axis_x: 1
   axis_y: 2

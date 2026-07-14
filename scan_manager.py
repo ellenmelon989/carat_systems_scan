@@ -95,7 +95,21 @@ class ScanManager:
 
         self.logger = DataLogger(config, store=self.store)
 
-    def run(self):
+    def run(self, on_point=None, stop_event=None):
+        """
+        on_point: optional callback(record: dict) -> None, invoked after each
+        point (including reference-point revisits) has been written to disk.
+        Lets a caller (e.g. a GUI) observe progress without scan_manager
+        knowing anything about what's consuming it. Called from whatever
+        thread run() executes on — the caller is responsible for any
+        thread-safe handoff (e.g. pushing onto a queue.Queue rather than
+        touching UI widgets directly from here).
+
+        stop_event: optional threading.Event, checked once per grid point
+        (between points, not mid-point). Setting it stops the scan after
+        the in-flight point finishes and is written — logged as an abort,
+        not as "Scan complete".
+        """
         self.logger.write_metadata()
         self.logger.log_event("Scan started")
 
@@ -119,7 +133,11 @@ class ScanManager:
 
         point_id = 0
         for ix, iy, x, y in points:
-            self._measure_point(point_id, ix, iy, x, y)
+            if stop_event is not None and stop_event.is_set():
+                self.logger.log_event(f"Scan aborted by operator after point {point_id}")
+                return
+
+            self._measure_point(point_id, ix, iy, x, y, on_point=on_point)
             point_id += 1
 
             if rehome_enabled and rehome_every > 0 and point_id % rehome_every == 0:
@@ -133,12 +151,13 @@ class ScanManager:
                                        f"after point {point_id}")
                 # Reference points don't belong to the spatial grid — skip HDF5 write
                 self._measure_point(point_id, None, None,
-                                    ref_position[0], ref_position[1], is_reference=True)
+                                    ref_position[0], ref_position[1],
+                                    is_reference=True, on_point=on_point)
                 point_id += 1
 
         self.logger.log_event("Scan complete")
 
-    def _measure_point(self, point_id, ix, iy, x, y, is_reference=False):
+    def _measure_point(self, point_id, ix, iy, x, y, is_reference=False, on_point=None):
         limits = self.config["motion"]["soft_limits"]
         self.motion.check_limits(x, y, limits)
 
@@ -168,6 +187,9 @@ class ScanManager:
             ix=ix,
             iy=iy,
         )
+
+        if on_point is not None:
+            on_point(record)
 
         tag = "REF" if is_reference else "PT"
         self.logger.log_event(
