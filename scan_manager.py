@@ -199,11 +199,20 @@ class ScanManager:
         limits = self.config["motion"]["soft_limits"]
         self.motion.check_limits(x, y, limits)
 
-        self.motion.move_to(x, y)
-        self.motion.wait_for_settle(self.scan_cfg["settle_time_s"])
+        motion_ok, motion_error_detail = self._move_with_retry(x, y)
 
-        ir_result = self._read_ir_with_retry()
-        oes_result, wavelengths, intensities = self._read_oes_with_retry()
+        if motion_ok:
+            ir_result = self._read_ir_with_retry()
+            oes_result, wavelengths, intensities = self._read_oes_with_retry()
+        else:
+            # Position is unknown/unreliable after a failed move (axis
+            # timeout, stall, comm fault) — don't trust an IR/OES reading
+            # taken from wherever the mirror actually ended up. Flag the
+            # point and move on rather than measuring blind or aborting
+            # the whole scan (see _move_with_retry).
+            ir_result = {"value": float("nan"), "error": True}
+            oes_result = {"saturated": False, "error": True}
+            wavelengths, intensities = None, None
 
         if intensities is not None:
             feature_values = extract_features(
@@ -215,6 +224,12 @@ class ScanManager:
 
         record = build_point_record(point_id, x, y, ir_result, oes_result, feature_values)
         record["is_reference"] = is_reference
+        record["motion_error"] = not motion_ok
+        # Always present (not conditional) — _append_summary_row derives the
+        # CSV header from the first row's keys, so a key that only shows up
+        # on later (faulted) rows would silently misalign every column after
+        # it. Empty string on success keeps every row's schema identical.
+        record["motion_error_detail"] = motion_error_detail or ""
 
         # Pass ix/iy so DataLogger can forward them to OESStore.
         # Reference points have ix=iy=None — DataLogger skips the HDF5 write.
@@ -235,6 +250,56 @@ class ScanManager:
             f"IR={ir_result.get('value')} err={ir_result.get('error')} "
             f"OES_err={oes_result.get('error')} sat={oes_result.get('saturated')}"
         )
+
+    def _move_with_retry(self, x, y):
+        """
+        Move to (x, y) and wait for settle, retrying on a motion fault
+        (axis timeout, stall, or comm error surfaced as RuntimeError by
+        the real controller) instead of letting it crash the whole scan
+        the way an uncaught wait_for_settle() timeout does.
+
+        Returns (ok, error_detail). On failure after exhausting retries,
+        _measure_point flags the point (motion_error=True, NaN readings)
+        and the scan continues to the next point.
+
+        Every fault is logged with get_position() at the moment of
+        failure — where the controller actually is vs. the (x, y) it was
+        asked to reach. That's the data needed to tell apart the two
+        likely mechanisms if this fires again:
+          - reported position lands near the target -> likely a status/
+            comms desync (is_moving() polling issue), not a real stall.
+          - reported position is far short of the target -> axis is
+            genuinely still mid-travel / lost steps, most plausible right
+            after a much larger move (e.g. a reference-point revisit)
+            left more real distance to cover than the next nominal grid
+            step assumes. Don't discard these log lines.
+        """
+        max_retries = self.error_cfg["max_retries"]
+        last_error = None
+
+        for attempt in range(max_retries + 1):
+            try:
+                self.motion.move_to(x, y)
+                self.motion.wait_for_settle(self.scan_cfg["settle_time_s"])
+                return True, None
+            except RuntimeError as e:
+                last_error = str(e)
+                try:
+                    actual = self.motion.get_position()
+                except Exception:
+                    actual = "unavailable"
+                self.logger.log_event(
+                    f"Motion fault moving to ({x}, {y}) "
+                    f"(attempt {attempt + 1}/{max_retries + 1}): {e} | "
+                    f"position at fault: {actual}"
+                )
+
+        self.logger.log_event(
+            f"Motion fault persisted after {max_retries + 1} attempts moving to "
+            f"({x}, {y}) — flagging point instead of aborting scan. "
+            f"Last error: {last_error}"
+        )
+        return False, last_error
 
     def _read_ir_with_retry(self):
         max_retries = self.error_cfg["max_retries"]
