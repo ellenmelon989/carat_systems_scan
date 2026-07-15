@@ -9,15 +9,25 @@ Implements:
 - Raster/serpentine 2D grid generation
 - Per-point error policy (retry -> NaN + flag -> continue)
 - Periodic revisit of a fixed reference point for drift tracking
+- Optional multi-pass scanning (scan.passes in config.yaml): repeats the
+  ENTIRE grid N times so every point gets rechecked over the course of
+  the scan, not just the one fixed reference point. Defaults to 1 pass
+  (old behavior). See OESStore's pass_id axis for how repeats are
+  preserved rather than overwriting each other on disk.
 """
 import numpy as np
 
-from motion.motion_controller import get_motion_controller
+from motion.motion_controller import get_motion_controller, AxisStateUnknown
 from readers.ir_reader_base import get_ir_reader
 from readers.spectrometer_reader_base import get_spectrometer_reader
 from data_logger import DataLogger, build_point_record
 from oes_store import OESStore
-from scan_params import grid_dims_from_range, validate_dwell_time_s
+from scan_params import (
+    PASSES_DEFAULT,
+    grid_dims_from_range,
+    validate_dwell_time_s,
+    validate_passes,
+)
 
 
 def generate_grid(scan_cfg):
@@ -84,14 +94,24 @@ class ScanManager:
         # scan_params.py for the valid range).
         self.dwell_time_s = validate_dwell_time_s(self.scan_cfg["dwell_time_s"])
 
+        # Number of full-grid passes (scan.passes in config.yaml). Defaults
+        # to 1 (old single-pass behavior) so existing configs are
+        # unaffected. >1 means the ENTIRE grid repeats that many times —
+        # this is the "revisit every point" path, distinct from (and in
+        # addition to) the single fixed reference_point revisit below.
+        self.passes = validate_passes(self.scan_cfg.get("passes", PASSES_DEFAULT))
+
         # Build OESStore from grid coords so it's ready before the scan starts.
         # Wavelength dimension is initialized lazily on first write_point().
+        # n_passes must be given upfront so the pass axis can be
+        # pre-allocated (see oes_store.py) — a later pass overwriting a
+        # smaller array would silently discard earlier passes' data.
         _, xs, ys = generate_grid(self.scan_cfg)
         hdf5_path = config["output"].get(
             "oes_hdf5",
             config["output"]["base_dir"] + "/oes.h5",
         )
-        self.store = OESStore(hdf5_path, x_coords_mm=xs, y_coords_mm=ys)
+        self.store = OESStore(hdf5_path, x_coords_mm=xs, y_coords_mm=ys, n_passes=self.passes)
 
         self.logger = DataLogger(config, store=self.store)
 
@@ -149,7 +169,8 @@ class ScanManager:
         not as "Scan complete".
         """
         self.logger.write_metadata()
-        self.logger.log_event("Scan started")
+        self.logger.log_event(f"Scan started ({self.passes} pass"
+                               f"{'es' if self.passes != 1 else ''})")
 
         self._safe_rehome("scan start")
         self.spectrometer.set_integration_time(self.oes_cfg["integration_time_us"])
@@ -169,33 +190,60 @@ class ScanManager:
         rehome_enabled = rehome_cfg.get("enabled", False)
         rehome_every = rehome_cfg.get("every_n_points", 0)
 
+        # point_id is a single counter spanning every pass (not reset per
+        # pass) — keeps CSV point_id unique per row and keeps the
+        # rehome/reference-revisit "every N points" cadence continuous
+        # across pass boundaries instead of restarting each pass.
         point_id = 0
-        for ix, iy, x, y in points:
-            if stop_event is not None and stop_event.is_set():
-                self.logger.log_event(f"Scan aborted by operator after point {point_id}")
-                return
+        try:
+            for pass_id in range(self.passes):
+                if self.passes > 1:
+                    self.logger.log_event(f"Starting pass {pass_id + 1}/{self.passes}")
 
-            self._measure_point(point_id, ix, iy, x, y, on_point=on_point)
-            point_id += 1
+                for ix, iy, x, y in points:
+                    if stop_event is not None and stop_event.is_set():
+                        self.logger.log_event(f"Scan aborted by operator after point {point_id} "
+                                               f"(pass {pass_id + 1}/{self.passes})")
+                        return
 
-            if rehome_enabled and rehome_every > 0 and point_id % rehome_every == 0:
-                self.logger.log_event(
-                    f"Re-homing after point {point_id} (open-loop drift reset)"
-                )
-                self._safe_rehome(f"periodic rehome after point {point_id}")
+                    self._measure_point(point_id, ix, iy, x, y, pass_id=pass_id, on_point=on_point)
+                    point_id += 1
 
-            if ref_enabled and ref_every > 0 and point_id % ref_every == 0:
-                self.logger.log_event(f"Revisiting reference point {ref_position} "
-                                       f"after point {point_id}")
-                # Reference points don't belong to the spatial grid — skip HDF5 write
-                self._measure_point(point_id, None, None,
-                                    ref_position[0], ref_position[1],
-                                    is_reference=True, on_point=on_point)
-                point_id += 1
+                    if rehome_enabled and rehome_every > 0 and point_id % rehome_every == 0:
+                        self.logger.log_event(
+                            f"Re-homing after point {point_id} (open-loop drift reset)"
+                        )
+                        self._safe_rehome(f"periodic rehome after point {point_id}")
 
-        self.logger.log_event("Scan complete")
+                    if ref_enabled and ref_every > 0 and point_id % ref_every == 0:
+                        self.logger.log_event(f"Revisiting reference point {ref_position} "
+                                               f"after point {point_id}")
+                        # Reference points don't belong to the spatial grid — skip HDF5 write
+                        self._measure_point(point_id, None, None,
+                                            ref_position[0], ref_position[1],
+                                            pass_id=pass_id, is_reference=True, on_point=on_point)
+                        point_id += 1
+        except AxisStateUnknown:
+            # Unlike an ordinary motion fault (flagged and continued inside
+            # _measure_point), this means the last stop() couldn't even be
+            # confirmed — the axis may still be physically moving. Do NOT
+            # continue the loop: the next iteration's move_to() would be
+            # issued onto an axis in an unverified state, which is the
+            # exact "leftover distance" queuing failure this is guarding
+            # against. Stop here; all points completed so far are already
+            # flushed to disk (DataLogger writes per-point, not buffered).
+            self.logger.log_event(
+                f"Scan STOPPED after point {point_id}: axis state unknown "
+                "after a motion fault. Check the hardware (mechanical "
+                "binding, cabling, 8742 connection) before running again."
+            )
+            return
 
-    def _measure_point(self, point_id, ix, iy, x, y, is_reference=False, on_point=None):
+        self.logger.log_event(f"Scan complete ({self.passes} pass"
+                               f"{'es' if self.passes != 1 else ''}, "
+                               f"{point_id} total points written)")
+
+    def _measure_point(self, point_id, ix, iy, x, y, pass_id=0, is_reference=False, on_point=None):
         limits = self.config["motion"]["soft_limits"]
         self.motion.check_limits(x, y, limits)
 
@@ -222,7 +270,8 @@ class ScanManager:
         else:
             feature_values = {name: float("nan") for name in self.oes_cfg["features"]}
 
-        record = build_point_record(point_id, x, y, ir_result, oes_result, feature_values)
+        record = build_point_record(point_id, x, y, ir_result, oes_result, feature_values,
+                                     pass_id=pass_id)
         record["is_reference"] = is_reference
         record["motion_error"] = not motion_ok
         # Always present (not conditional) — _append_summary_row derives the
@@ -245,8 +294,9 @@ class ScanManager:
             on_point(record)
 
         tag = "REF" if is_reference else "PT"
+        pass_tag = f" pass={pass_id + 1}/{self.passes}" if self.passes > 1 else ""
         self.logger.log_event(
-            f"[{tag}] point {point_id} (x={x}, y={y}) "
+            f"[{tag}] point {point_id}{pass_tag} (x={x}, y={y}) "
             f"IR={ir_result.get('value')} err={ir_result.get('error')} "
             f"OES_err={oes_result.get('error')} sat={oes_result.get('saturated')}"
         )
@@ -258,9 +308,23 @@ class ScanManager:
         the real controller) instead of letting it crash the whole scan
         the way an uncaught wait_for_settle() timeout does.
 
-        Returns (ok, error_detail). On failure after exhausting retries,
-        _measure_point flags the point (motion_error=True, NaN readings)
-        and the scan continues to the next point.
+        Returns (ok, error_detail) for an ordinary, recoverable motion
+        fault. On failure after exhausting retries, _measure_point flags
+        the point (motion_error=True, NaN readings) and the scan
+        continues to the next point — safe, because the axis was
+        confirmed stopped before the exception was raised (see
+        MotionFault in motion_controller.py).
+
+        Raises AxisStateUnknown instead of returning, and does NOT
+        retry, if the underlying controller couldn't even confirm the
+        axis actually stopped. Issuing another move_to() here would be
+        exactly the "queue a new move on top of leftover motion"
+        failure mode this method exists to prevent. This is deliberately
+        NOT caught here — it propagates up through _measure_point to
+        run(), which stops the whole scan rather than commanding this
+        axis (or the other one, which shares wait_for_settle) again.
+        Callers other than run() must let it propagate for the same
+        reason.
 
         Every fault is logged with get_position() at the moment of
         failure — where the controller actually is vs. the (x, y) it was
@@ -282,6 +346,19 @@ class ScanManager:
                 self.motion.move_to(x, y)
                 self.motion.wait_for_settle(self.scan_cfg["settle_time_s"])
                 return True, None
+            except AxisStateUnknown as e:
+                try:
+                    actual = self.motion.get_position()
+                except Exception:
+                    actual = "unavailable"
+                self.logger.log_event(
+                    f"Axis state UNKNOWN moving to ({x}, {y}) after attempt "
+                    f"{attempt + 1}: {e} | last reported position: {actual} | "
+                    "NOT retrying, NOT continuing scan — refusing to issue "
+                    "another move onto an unconfirmed axis. Manual check "
+                    "required before this axis moves again."
+                )
+                raise
             except RuntimeError as e:
                 last_error = str(e)
                 try:

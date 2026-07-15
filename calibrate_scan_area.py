@@ -300,6 +300,20 @@ def prompt_float(label, default, validator):
             print(f"  {e} — try again.")
 
 
+def prompt_int(label, default, validator):
+    while True:
+        raw = input(f"  {label} [{default}]: ").strip()
+        try:
+            value = int(raw) if raw else default
+        except ValueError:
+            print("  Enter a whole number — try again.")
+            continue
+        try:
+            return validator(value)
+        except ValueError as e:
+            print(f"  {e} — try again.")
+
+
 # ---------------------------------------------------------------------------
 # Config file patching — line-level, preserves comments
 # ---------------------------------------------------------------------------
@@ -334,9 +348,9 @@ def write_results(config_path: Path, results: dict):
     Patch config.yaml with the calibration results.
 
     `results` always has x_range_mm, y_range_mm, wafer_center_mm (each a
-    [lo, hi] pair), step_size_mm, and dwell_time_s. It may also carry
-    steps_per_mm_x/steps_per_mm_y (if calibrate_steps_per_mm ran) and
-    home_steps (if the operator chose to write the suggested homing
+    [lo, hi] pair), step_size_mm, dwell_time_s, and passes. It may also
+    carry steps_per_mm_x/steps_per_mm_y (if calibrate_steps_per_mm ran)
+    and home_steps (if the operator chose to write the suggested homing
     bound) — both optional scalars, patched the same way as everything
     else, one dict in rather than separate parameters.
     """
@@ -348,6 +362,7 @@ def write_results(config_path: Path, results: dict):
 
     text = _patch_scalar(text, "step_size_mm", f"{results['step_size_mm']}")
     text = _patch_scalar(text, "dwell_time_s", f"{results['dwell_time_s']}")
+    text = _patch_scalar(text, "passes", f"{results['passes']}")
 
     if "steps_per_mm_x" in results:
         text = _patch_scalar(text, "steps_per_mm_x", f"{results['steps_per_mm_x']:.4f}")
@@ -420,12 +435,20 @@ def main():
         f"Dwell time s (range {scan_params.DWELL_TIME_MIN_S}-{scan_params.DWELL_TIME_MAX_S})",
         scan_params.DWELL_TIME_DEFAULT_S, scan_params.validate_dwell_time_s,
     )
+    passes = prompt_int(
+        f"Number of full-grid passes (range {scan_params.PASSES_MIN}-{scan_params.PASSES_MAX}; "
+        "1 = scan the grid once, >1 = revisit every point that many times over the scan, "
+        "for drift/oscillation tracking)",
+        scan_params.PASSES_DEFAULT, scan_params.validate_passes,
+    )
 
     nx, ny = scan_params.grid_dims_from_range(area["x_range_mm"], area["y_range_mm"], step_size_mm)
-    est_s = scan_params.estimate_scan_time_s(nx, ny, dwell_time_s)
+    est_s = scan_params.estimate_scan_time_s(nx, ny, dwell_time_s, passes=passes)
     print("\n--- Preview ---")
-    print(f"  Grid: {nx} x {ny} = {nx * ny} points")
-    print(f"  Estimated scan time: {est_s / 60:.1f} min")
+    print(f"  Grid: {nx} x {ny} = {nx * ny} points per pass")
+    print(f"  Passes: {passes}")
+    print(f"  Estimated scan time: {est_s / 60:.1f} min "
+          f"({nx * ny * passes} total point measurements, excluding reference-point revisits)")
 
     if input("\nWrite these values to config.yaml? [y/N] ").strip().lower() != "y":
         print("Not written. Re-run to try again.")
@@ -434,6 +457,7 @@ def main():
     results = dict(area)
     results["step_size_mm"] = step_size_mm
     results["dwell_time_s"] = dwell_time_s
+    results["passes"] = passes
     if spmm_result is not None:
         results["steps_per_mm_x"] = spmm_result["steps_per_mm_x"]
         results["steps_per_mm_y"] = spmm_result["steps_per_mm_y"]

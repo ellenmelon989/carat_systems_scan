@@ -6,26 +6,38 @@ single structured file that preserves the full (x, y, wavelength) grid.
 
 HDF5 schema
 -----------
-  /x_mm           (nx,)          mm, spatial grid x coords
-  /y_mm           (ny,)          mm, spatial grid y coords
-  /wavelength_nm  (nλ,)          nm, initialized on first write
-  /intensity      (nx, ny, nλ)   float32, NaN until written
-  /ir_temp_c      (nx, ny)       float32, NaN until written
-  /timestamp      (nx, ny)       float64, Unix epoch seconds
-  /saturated      (nx, ny)       bool
-  /ir_error       (nx, ny)       bool
-  /oes_error      (nx, ny)       bool
+  /x_mm           (nx,)              mm, spatial grid x coords
+  /y_mm           (ny,)              mm, spatial grid y coords
+  /wavelength_nm  (nλ,)              nm, initialized on first write
+  /intensity      (nx, ny, npass, nλ) float32, NaN until written
+  /ir_temp_c      (nx, ny, npass)    float32, NaN until written
+  /timestamp      (nx, ny, npass)    float64, Unix epoch seconds
+  /saturated      (nx, ny, npass)    bool
+  /ir_error       (nx, ny, npass)    bool
+  /oes_error      (nx, ny, npass)    bool
+
+The `npass` axis holds one full-grid-pass revisit per index (see
+scan.passes in config.yaml / ScanManager). npass=1 is the old shape in
+everything but name — single-pass scans just have a size-1 pass axis,
+so existing single-pass analysis code only needs `.isel(pass=0)` (or
+`.sel(...).squeeze("pass")`) added to keep working. This axis exists
+specifically so a repeated-pass scan preserves a per-point time series
+instead of each later pass silently overwriting the previous one —
+that history is what per-XY-point drift/oscillation tracking (T/e over
+time) needs.
 
 Crash safety: each write_point() opens the file, writes, and closes
 immediately — a crashed scan leaves all completed points intact.
 
 Typical usage
 -------------
-    # 1. At scan start
-    store = OESStore("scan_data/oes.h5", x_coords_mm=xs, y_coords_mm=ys)
+    # 1. At scan start (n_passes from scan.passes in config.yaml)
+    store = OESStore("scan_data/oes.h5", x_coords_mm=xs, y_coords_mm=ys,
+                      n_passes=3)
 
-    # 2. Per point (ix/iy are 0-based grid indices, not mm values)
-    store.write_point(ix=3, iy=7,
+    # 2. Per point (ix/iy are 0-based grid indices, not mm values;
+    #    pass_id is the 0-based index of which full-grid pass this is)
+    store.write_point(ix=3, iy=7, pass_id=0,
                       wavelengths=reading.wavelengths,
                       intensities=reading.intensities,
                       ir_temp_c=950.2,
@@ -35,14 +47,14 @@ Typical usage
     # 3. Analysis / post-processing
     ds = OESStore.load("scan_data/oes.h5")
 
-    # Full spectrum at the center point
-    ds.intensity.sel(x_mm=25.0, y_mm=25.0, method="nearest")
+    # Full spectrum at the center point, first pass
+    ds.intensity.sel(x_mm=25.0, y_mm=25.0, method="nearest").isel(pass_id=0)
 
-    # C2 Swan (516 nm) spatial map — plug straight into matplotlib
-    ds.intensity.sel(wavelength_nm=516.0, method="nearest").plot()
+    # C2 Swan (516 nm) spatial map for the latest pass
+    ds.intensity.sel(wavelength_nm=516.0, method="nearest").isel(pass_id=-1)
 
-    # IR temperature map
-    ds.ir_temp_c.plot()
+    # IR temperature time series at one point, across passes (oscillation input)
+    ds.ir_temp_c.sel(x_mm=25.0, y_mm=25.0, method="nearest")
 
     # All spectra where IR > 900 °C
     hot = ds.where(ds.ir_temp_c > 900)
@@ -67,7 +79,7 @@ class OESStore:
     first call to write_point() that supplies wavelengths.
     """
 
-    def __init__(self, path: str, x_coords_mm, y_coords_mm):
+    def __init__(self, path: str, x_coords_mm, y_coords_mm, n_passes: int = 1):
         """
         Parameters
         ----------
@@ -77,10 +89,16 @@ class OESStore:
             1-D array of x grid positions in mm (length nx).
         y_coords_mm : array-like
             1-D array of y grid positions in mm (length ny).
+        n_passes : int
+            Number of full-grid passes this scan will make (scan.passes
+            in config.yaml). Must be known upfront so the pass axis can
+            be pre-allocated like every other dimension here — defaults
+            to 1 (single pass) for callers that don't care about repeats.
         """
         self.path = path
         self.x_coords = np.asarray(x_coords_mm, dtype="float32")
         self.y_coords = np.asarray(y_coords_mm, dtype="float32")
+        self.n_passes = int(n_passes)
         self._initialized = False
 
     # ------------------------------------------------------------------
@@ -91,24 +109,26 @@ class OESStore:
         """Create the HDF5 file and pre-allocate all datasets."""
         nx = len(self.x_coords)
         ny = len(self.y_coords)
+        np_ = self.n_passes
         nl = len(wavelengths)
 
         with h5py.File(self.path, "w") as f:
             f.create_dataset("x_mm", data=self.x_coords)
             f.create_dataset("y_mm", data=self.y_coords)
             f.create_dataset("wavelength_nm", data=wavelengths.astype("float32"))
+            f.create_dataset("pass_id", data=np.arange(np_, dtype="int32"))
 
-            f.create_dataset("intensity", shape=(nx, ny, nl),
+            f.create_dataset("intensity", shape=(nx, ny, np_, nl),
                              dtype="float32", fillvalue=np.nan)
-            f.create_dataset("ir_temp_c", shape=(nx, ny),
+            f.create_dataset("ir_temp_c", shape=(nx, ny, np_),
                              dtype="float32", fillvalue=np.nan)
-            f.create_dataset("timestamp", shape=(nx, ny),
+            f.create_dataset("timestamp", shape=(nx, ny, np_),
                              dtype="float64", fillvalue=np.nan)
-            f.create_dataset("saturated", shape=(nx, ny),
+            f.create_dataset("saturated", shape=(nx, ny, np_),
                              dtype=bool, fillvalue=False)
-            f.create_dataset("ir_error", shape=(nx, ny),
+            f.create_dataset("ir_error", shape=(nx, ny, np_),
                              dtype=bool, fillvalue=False)
-            f.create_dataset("oes_error", shape=(nx, ny),
+            f.create_dataset("oes_error", shape=(nx, ny, np_),
                              dtype=bool, fillvalue=False)
 
         self._initialized = True
@@ -121,6 +141,7 @@ class OESStore:
         self,
         ix: int,
         iy: int,
+        pass_id: int = 0,
         wavelengths: Optional[np.ndarray] = None,
         intensities: Optional[np.ndarray] = None,
         ir_temp_c: Optional[float] = None,
@@ -136,6 +157,11 @@ class OESStore:
         ----------
         ix, iy : int
             0-based grid indices (not mm values).
+        pass_id : int
+            0-based index of which full-grid pass this point belongs to.
+            Must be < n_passes given at construction — out-of-range
+            raises IndexError from h5py rather than silently truncating,
+            since that would quietly discard a real measurement.
         wavelengths : np.ndarray, optional
             Required on the first call to initialize the file.
         intensities : np.ndarray, optional
@@ -155,13 +181,13 @@ class OESStore:
 
         with h5py.File(self.path, "a") as f:
             if intensities is not None:
-                f["intensity"][ix, iy, :] = intensities.astype("float32")
+                f["intensity"][ix, iy, pass_id, :] = intensities.astype("float32")
             if ir_temp_c is not None:
-                f["ir_temp_c"][ix, iy] = float(ir_temp_c)
-            f["timestamp"][ix, iy] = timestamp if timestamp is not None else time.time()
-            f["saturated"][ix, iy] = saturated
-            f["ir_error"][ix, iy] = ir_error
-            f["oes_error"][ix, iy] = oes_error
+                f["ir_temp_c"][ix, iy, pass_id] = float(ir_temp_c)
+            f["timestamp"][ix, iy, pass_id] = timestamp if timestamp is not None else time.time()
+            f["saturated"][ix, iy, pass_id] = saturated
+            f["ir_error"][ix, iy, pass_id] = ir_error
+            f["oes_error"][ix, iy, pass_id] = oes_error
 
     @staticmethod
     def load(path: str) -> xr.Dataset:
@@ -174,29 +200,37 @@ class OESStore:
         Returns
         -------
         xr.Dataset with data variables:
-            intensity   (x_mm, y_mm, wavelength_nm)
-            ir_temp_c   (x_mm, y_mm)
-            timestamp   (x_mm, y_mm)
-            saturated   (x_mm, y_mm)
-            ir_error    (x_mm, y_mm)
-            oes_error   (x_mm, y_mm)
+            intensity   (x_mm, y_mm, pass_id, wavelength_nm)
+            ir_temp_c   (x_mm, y_mm, pass_id)
+            timestamp   (x_mm, y_mm, pass_id)
+            saturated   (x_mm, y_mm, pass_id)
+            ir_error    (x_mm, y_mm, pass_id)
+            oes_error   (x_mm, y_mm, pass_id)
+
+        pass_id is size 1 for an ordinary single-pass scan — index/select
+        it the same way regardless (e.g. `.isel(pass_id=-1)` for "latest
+        pass"), rather than special-casing single- vs. multi-pass scans.
+        `.sel(x_mm=..., y_mm=..., method="nearest")` on ir_temp_c gives
+        the full time series across passes at one point, which is the
+        oscillation-detection input.
         """
         with h5py.File(path, "r") as f:
             return xr.Dataset(
                 {
                     "intensity": (
-                        ["x_mm", "y_mm", "wavelength_nm"],
+                        ["x_mm", "y_mm", "pass_id", "wavelength_nm"],
                         f["intensity"][:],
                     ),
-                    "ir_temp_c": (["x_mm", "y_mm"], f["ir_temp_c"][:]),
-                    "timestamp": (["x_mm", "y_mm"], f["timestamp"][:]),
-                    "saturated": (["x_mm", "y_mm"], f["saturated"][:]),
-                    "ir_error": (["x_mm", "y_mm"], f["ir_error"][:]),
-                    "oes_error": (["x_mm", "y_mm"], f["oes_error"][:]),
+                    "ir_temp_c": (["x_mm", "y_mm", "pass_id"], f["ir_temp_c"][:]),
+                    "timestamp": (["x_mm", "y_mm", "pass_id"], f["timestamp"][:]),
+                    "saturated": (["x_mm", "y_mm", "pass_id"], f["saturated"][:]),
+                    "ir_error": (["x_mm", "y_mm", "pass_id"], f["ir_error"][:]),
+                    "oes_error": (["x_mm", "y_mm", "pass_id"], f["oes_error"][:]),
                 },
                 coords={
                     "x_mm": f["x_mm"][:],
                     "y_mm": f["y_mm"][:],
+                    "pass_id": f["pass_id"][:],
                     "wavelength_nm": f["wavelength_nm"][:],
                 },
                 attrs={"source": str(path)},
@@ -220,29 +254,38 @@ if __name__ == "__main__":
     with tempfile.NamedTemporaryFile(suffix=".h5", delete=False) as tmp:
         path = tmp.name
 
+    n_passes = 2
     try:
-        store = OESStore(path, x_coords_mm=xs, y_coords_mm=ys)
+        store = OESStore(path, x_coords_mm=xs, y_coords_mm=ys, n_passes=n_passes)
 
-        for ix, x in enumerate(xs):
-            for iy, y in enumerate(ys):
-                # fake spectrum: baseline + C2 Swan peak at 516 nm
-                spec = np.random.normal(200, 50, len(wl))
-                spec += 12000 * np.exp(-0.5 * ((wl - 516) / 4) ** 2)
-                spec = np.clip(spec, 0, 65535)
+        for pass_id in range(n_passes):
+            for ix, x in enumerate(xs):
+                for iy, y in enumerate(ys):
+                    # fake spectrum: baseline + C2 Swan peak at 516 nm,
+                    # drifting slightly between passes so the pass axis
+                    # is actually distinguishable in the assertions below
+                    spec = np.random.normal(200, 50, len(wl))
+                    spec += 12000 * np.exp(-0.5 * ((wl - 516) / 4) ** 2)
+                    spec = np.clip(spec, 0, 65535)
 
-                store.write_point(
-                    ix=ix, iy=iy,
-                    wavelengths=wl,
-                    intensities=spec,
-                    ir_temp_c=900.0 + ix * 5 + iy,
-                    saturated=False,
-                )
+                    store.write_point(
+                        ix=ix, iy=iy, pass_id=pass_id,
+                        wavelengths=wl,
+                        intensities=spec,
+                        ir_temp_c=900.0 + ix * 5 + iy + pass_id * 10,
+                        saturated=False,
+                    )
 
         ds = OESStore.load(path)
         print(f"Dataset shape: {dict(ds.sizes)}")
+        assert ds.sizes["pass_id"] == n_passes
+        assert not np.isnan(ds.ir_temp_c.values).any(), "every (ix, iy, pass) should be written"
+        # Same XY point, later pass should be +10 (per the fake drift above)
+        delta = float(ds.ir_temp_c.isel(pass_id=1).values[2, 2] - ds.ir_temp_c.isel(pass_id=0).values[2, 2])
+        assert abs(delta - 10.0) < 1e-3, f"expected pass-to-pass delta of 10.0, got {delta}"
         print(f"IR range: {float(ds.ir_temp_c.min()):.1f} – {float(ds.ir_temp_c.max()):.1f} °C")
-        c2_map = ds.intensity.sel(wavelength_nm=516.0, method="nearest")
-        print(f"C2 Swan (516 nm) map mean: {float(c2_map.mean()):.1f}")
+        c2_map = ds.intensity.sel(wavelength_nm=516.0, method="nearest").isel(pass_id=-1)
+        print(f"C2 Swan (516 nm) map mean (latest pass): {float(c2_map.mean()):.1f}")
         print("OK")
     finally:
         os.unlink(path)

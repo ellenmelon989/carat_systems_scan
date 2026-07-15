@@ -14,6 +14,30 @@ from abc import ABC, abstractmethod
 import time
 
 
+class MotionFault(RuntimeError):
+    """
+    A move/settle failed (axis timeout, stall, comm error) but the
+    controller was able to command a stop and CONFIRM the axis is now
+    actually idle. It's safe for a caller to issue a fresh move_to()
+    after this — the axis isn't secretly still working through
+    leftover distance from the move that failed.
+    """
+
+
+class AxisStateUnknown(MotionFault):
+    """
+    A move/settle failed AND the follow-up stop could not be confirmed
+    (the axis never reported "not moving" even after an explicit stop
+    command). The axis's real physical state is unknown — it may still
+    be traveling. Callers MUST NOT respond to this by issuing another
+    move_to(): a new absolute-position command layered on top of
+    unconfirmed motion is exactly how a small routine step can silently
+    inherit a large leftover distance from a prior move. Treat this as
+    non-retryable — flag the point/scan and require a human to check
+    the hardware before moving again.
+    """
+
+
 class MotionController(ABC):
     """Abstract interface for 2D mirror motion control."""
 

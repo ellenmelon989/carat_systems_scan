@@ -13,6 +13,11 @@ scan:
   scan_order: raster   # raster | serpentine
   dwell_time_s: 8.0     # per-point IR averaging duration; valid range 2-22s (see scan_params.py)
   settle_time_s: 0.5
+  passes: 1             # number of full-grid passes; valid range 1-50 (see scan_params.py).
+                         # >1 repeats the ENTIRE grid that many times so every point gets
+                         # rechecked over the course of the scan (not just reference_point
+                         # below) — needed for per-point drift/oscillation tracking over time.
+                         # Each pass roughly multiplies total scan time; 1 = old behavior.
   reference_point:
     enabled: true
     revisit_every_n_points: 25

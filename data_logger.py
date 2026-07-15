@@ -112,7 +112,7 @@ class DataLogger:
         the full spectrum into the HDF5 file.
 
         point_record: dict with keys such as
-            point_id, x_mm, y_mm, ir_temp_c, ir_error,
+            point_id, pass_id, x_mm, y_mm, ir_temp_c, ir_error,
             oes_error, oes_saturated, feature_<name> values, timestamp
         ix, iy : int, optional
             Grid indices required when an OESStore is attached.
@@ -128,6 +128,7 @@ class DataLogger:
             self.store.write_point(
                 ix=ix,
                 iy=iy,
+                pass_id=point_record.get("pass_id", 0),
                 wavelengths=wavelengths,
                 intensities=intensities,
                 ir_temp_c=point_record.get("ir_temp_c"),
@@ -159,7 +160,7 @@ class DataLogger:
                 writer.writerow([wl, intens])
 
 
-def build_point_record(point_id, x_mm, y_mm, ir_result, oes_result, feature_values):
+def build_point_record(point_id, x_mm, y_mm, ir_result, oes_result, feature_values, pass_id=0):
     """
     Helper to assemble a flat dict for one scan point, suitable for
     DataLogger.write_point().
@@ -167,9 +168,13 @@ def build_point_record(point_id, x_mm, y_mm, ir_result, oes_result, feature_valu
     ir_result: dict with keys 'value', 'error' (bool)
     oes_result: dict with keys 'saturated', 'error' (bool)
     feature_values: dict of feature_name -> intensity
+    pass_id: 0-based index of which full-grid pass this point belongs to
+        (see scan.passes in config.yaml). 0 for single-pass scans, so
+        existing single-pass CSVs/callers are unaffected.
     """
     record = {
         "point_id": point_id,
+        "pass_id": pass_id,
         "x_mm": x_mm,
         "y_mm": y_mm,
         "timestamp": datetime.now().isoformat(),

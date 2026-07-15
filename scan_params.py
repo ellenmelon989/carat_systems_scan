@@ -22,6 +22,17 @@ STEP_SIZE_DEFAULT_MM = 2.0
 STEP_SIZE_MIN_MM = 1.0
 STEP_SIZE_MAX_MM = 11.0
 
+# Number of full grid passes per scan. 1 = old behavior (single pass; only
+# the fixed reference_point gets revisited). >1 repeats the ENTIRE grid
+# that many times so every point gets rechecked over the course of the
+# scan — needed for per-XY-point drift/oscillation tracking (T/e over
+# time); a single fixed reference point can't give you that. Upper bound
+# is a sanity cap, not a hardware limit — raise it if a real use case
+# needs more.
+PASSES_DEFAULT = 1
+PASSES_MIN = 1
+PASSES_MAX = 50
+
 
 def validate_dwell_time_s(dwell_time_s: float) -> float:
     """Raise ValueError if dwell_time_s is outside the operator-valid range."""
@@ -70,9 +81,25 @@ def grid_dims_from_range(x_range_mm, y_range_mm, step_size_mm: float):
     return nx, ny
 
 
-def estimate_scan_time_s(nx: int, ny: int, dwell_time_s: float, settle_time_s: float = 0.0) -> float:
-    """Rough total scan time estimate: point count * (dwell + settle)."""
-    return nx * ny * (dwell_time_s + settle_time_s)
+def validate_passes(passes: int) -> int:
+    """Raise ValueError if passes is outside the operator-valid range."""
+    passes = int(passes)
+    if not (PASSES_MIN <= passes <= PASSES_MAX):
+        raise ValueError(
+            f"passes={passes} outside valid range [{PASSES_MIN}, {PASSES_MAX}]"
+        )
+    return passes
+
+
+def estimate_scan_time_s(nx: int, ny: int, dwell_time_s: float, settle_time_s: float = 0.0,
+                          passes: int = 1) -> float:
+    """
+    Rough total scan time estimate: point count * (dwell + settle) * passes.
+
+    Does NOT include reference-point revisits or periodic rehomes (both
+    optional and config-dependent) — this is the grid-only floor.
+    """
+    return nx * ny * passes * (dwell_time_s + settle_time_s)
 
 
 if __name__ == "__main__":
@@ -93,6 +120,16 @@ if __name__ == "__main__":
     except ValueError:
         pass
 
+    try:
+        validate_passes(0)
+        raise AssertionError("expected ValueError for passes out of range")
+    except ValueError:
+        pass
+    assert validate_passes(3) == 3
+
     est = estimate_scan_time_s(*grid_dims_from_range([0, 50], [0, 50], 2.0), dwell_time_s=8.0)
-    print(f"26x26 grid @ 8s dwell -> {est/60:.1f} min estimated scan time")
+    print(f"26x26 grid @ 8s dwell, 1 pass -> {est/60:.1f} min estimated scan time")
+    est3 = estimate_scan_time_s(*grid_dims_from_range([0, 50], [0, 50], 2.0), dwell_time_s=8.0, passes=3)
+    assert est3 == est * 3
+    print(f"26x26 grid @ 8s dwell, 3 passes -> {est3/60:.1f} min estimated scan time")
     print("scan_params smoke test OK")

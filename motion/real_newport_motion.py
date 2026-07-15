@@ -84,11 +84,11 @@ except ImportError as exc:
     ) from exc
 
 try:
-    from .motion_controller import MotionController
+    from .motion_controller import MotionController, MotionFault, AxisStateUnknown
 except ImportError:
     # Fallback for running this file directly (e.g. python real_newport_motion.py),
     # where relative imports don't work because there's no parent package.
-    from motion_controller import MotionController
+    from motion_controller import MotionController, MotionFault, AxisStateUnknown
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +109,12 @@ _DEFAULT_HOME_VELOCITY = 200       # steps/s — slow for safety at hard stop
 _DEFAULT_MOVE_VELOCITY = 2000      # steps/s — tune for speed vs. vibration
 _DEFAULT_HOME_TIMEOUT = 60.0
 _DEFAULT_MOVE_TIMEOUT = 60.0
+_DEFAULT_STOP_CONFIRM_TIMEOUT = 10.0  # how long to wait for stop() to actually
+                                       # take effect before giving up on it too
+_STOP_CONFIRM_POLL_S = 0.05
+_SETTLE_CONFIRM_DELAY_S = 0.1  # gap before the second "not moving" read that
+                                # confirms a settle wasn't just a stale/transient
+                                # status reply
 
 
 class NewportPicomotorController(MotionController):
@@ -150,6 +156,9 @@ class NewportPicomotorController(MotionController):
         self._move_velocity = int(motion_cfg.get("move_velocity", _DEFAULT_MOVE_VELOCITY))
         self._home_timeout = float(motion_cfg.get("home_timeout_s", _DEFAULT_HOME_TIMEOUT))
         self._move_timeout = float(motion_cfg.get("move_timeout_s", _DEFAULT_MOVE_TIMEOUT))
+        self._stop_confirm_timeout = float(
+            motion_cfg.get("stop_confirm_timeout_s", _DEFAULT_STOP_CONFIRM_TIMEOUT)
+        )
 
         self._homed = False
         # Internal step-count origin (set during home)
@@ -387,24 +396,86 @@ class NewportPicomotorController(MotionController):
         self._set_velocity(axis, self._move_velocity)
 
     def _wait_move(self, axis: int, timeout_s: float, label: str = ""):
-        """Poll until axis is not moving or timeout_s elapses."""
+        """
+        Block until axis is confirmed idle, or raise.
+
+        "Confirmed" means two consecutive is_moving()==False reads,
+        separated by _SETTLE_CONFIRM_DELAY_S, not just one. A single
+        stale/transient "not moving" reply (comms lag, status-register
+        desync on the 8742) is exactly how a caller could conclude a
+        move finished and issue the next move_to() while the axis is
+        still physically working through leftover distance from this
+        one — which is how a routine 2mm step can silently inherit
+        real travel from a much larger prior move (e.g. a reference-
+        point revisit) and blow way past its own timeout. The double-
+        read costs one extra ~0.1s poll per successful move; cheap
+        insurance against that failure mode.
+
+        On timeout, we don't just fire-and-forget a stop() and hand
+        control back — we actively wait (up to _stop_confirm_timeout)
+        for the stop to actually take effect before raising, so that
+        by the time this call returns control to the caller, the axis
+        is DEFINITELY not moving. That's what makes it safe for
+        scan_manager to retry with a fresh move_to() afterward: the
+        raised MotionFault means "confirmed stopped, safe to re-issue
+        a move." If even the stop can't be confirmed within
+        _stop_confirm_timeout, we raise AxisStateUnknown instead — the
+        axis's real state is unverified and a caller MUST NOT respond
+        by sending another absolute move on top of it.
+        """
         deadline = time.monotonic() + timeout_s
         while time.monotonic() < deadline:
             try:
                 if not self._stage.is_moving(axis=axis):
-                    return
+                    time.sleep(_SETTLE_CONFIRM_DELAY_S)
+                    if not self._stage.is_moving(axis=axis):
+                        return
+                    logger.debug(
+                        "[%s] Axis %d reported not-moving then moving again on "
+                        "confirm read — treating as still in motion.",
+                        label, axis,
+                    )
             except Exception as exc:
                 raise RuntimeError(
                     f"[{label}] Lost communication with 8742 while waiting: {exc}"
                 ) from exc
             time.sleep(0.05)
-        # Timeout — stop the axis and raise
+
+        # Timed out waiting for the move itself. Command a stop, then
+        # actively confirm it took effect before raising — see docstring.
         try:
             self._stage.stop(axis=axis)
-        except Exception:
-            pass
-        raise RuntimeError(
-            f"[{label}] Axis {axis} did not stop within {timeout_s:.1f} s"
+        except Exception as exc:
+            raise AxisStateUnknown(
+                f"[{label}] Axis {axis} did not stop within {timeout_s:.1f} s, "
+                f"and the follow-up stop() command itself failed ({exc}). "
+                "Axis state is unknown — do not issue further moves without "
+                "checking the hardware."
+            ) from exc
+
+        stop_deadline = time.monotonic() + self._stop_confirm_timeout
+        while time.monotonic() < stop_deadline:
+            try:
+                if not self._stage.is_moving(axis=axis):
+                    raise MotionFault(
+                        f"[{label}] Axis {axis} did not stop within {timeout_s:.1f} s "
+                        f"(stop confirmed {self._stop_confirm_timeout - (stop_deadline - time.monotonic()):.1f} s "
+                        "after an explicit stop() command)"
+                    )
+            except MotionFault:
+                raise
+            except Exception:
+                # Comm hiccup while confirming the stop — can't tell if it's
+                # actually idle. Fall through to the unconfirmed-state raise
+                # below rather than guessing.
+                break
+            time.sleep(_STOP_CONFIRM_POLL_S)
+
+        raise AxisStateUnknown(
+            f"[{label}] Axis {axis} did not stop within {timeout_s:.1f} s, AND "
+            f"did not confirm stopped within {self._stop_confirm_timeout:.1f} s "
+            "after an explicit stop() command. Axis state is unknown — do not "
+            "issue further moves without checking the hardware."
         )
 
     def _set_velocity(self, axis: int, velocity: int):
