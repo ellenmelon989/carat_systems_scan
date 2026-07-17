@@ -25,6 +25,7 @@ from oes_store import OESStore
 from scan_params import (
     PASSES_DEFAULT,
     grid_dims_from_range,
+    in_radius,
     validate_dwell_time_s,
     validate_passes,
 )
@@ -42,10 +43,26 @@ def generate_grid(scan_cfg):
 
     ix, iy are 0-based grid indices used to address the HDF5 dataset;
     x_mm, y_mm are the physical positions in millimetres.
+
+    x_range_mm/y_range_mm describe a rectangular BOUNDING BOX around the
+    wafer (set from 4 edge jogs), not the wafer itself — a circular
+    wafer's own shape means that box's corners are off-sample by
+    construction. If scan.grid.wafer_radius_mm is set (calibrate_scan_area.py
+    computes and writes it), points outside that radius of
+    wafer_center_mm are dropped from the returned list entirely — never
+    measured, and never commanded as a move. xs/ys are still returned as
+    the FULL rectangular linspace (unmasked) — OESStore's HDF5 array is
+    shaped from these, and masked-out cells simply stay unwritten/NaN
+    rather than shrinking the array to a non-rectangular shape.
+    wafer_radius_mm absent/None (old configs, or not yet calibrated)
+    means no mask — every point in the rectangle is measured, exactly
+    the old behavior.
     """
     x0, x1 = scan_cfg["grid"]["x_range_mm"]
     y0, y1 = scan_cfg["grid"]["y_range_mm"]
     step_size_mm = scan_cfg["grid"]["step_size_mm"]
+    center_mm = scan_cfg["grid"].get("wafer_center_mm", [0.0, 0.0])
+    radius_mm = scan_cfg["grid"].get("wafer_radius_mm")
 
     nx, ny = grid_dims_from_range((x0, x1), (y0, y1), step_size_mm)
 
@@ -60,6 +77,8 @@ def generate_grid(scan_cfg):
         if order == "serpentine" and iy % 2 == 1:
             row = row[::-1]
         for ix, x in row:
+            if radius_mm is not None and not in_radius(x, y, center_mm, radius_mm):
+                continue
             points.append((ix, iy, float(x), float(y)))
 
     return points, xs, ys
@@ -79,9 +98,24 @@ def extract_features(wavelengths, intensities, features_cfg, window_nm):
 
 
 class ScanManager:
-    def __init__(self, config):
+    def __init__(self, config, motion=None):
+        """
+        motion: optional, pre-constructed MotionController. Defaults to
+        None, which builds a fresh one via get_motion_controller(config)
+        exactly as before — standalone `python scan_manager.py` is
+        unaffected.
+
+        Pass an existing (already-connected, already-homed) controller
+        instance instead when combining calibration and scanning into
+        one continuous session — see calibrate_scan_area.py's post-
+        calibration "run the scan now" prompt. Reusing the SAME object
+        (rather than letting ScanManager open a second connection) is
+        what makes it safe to also pass already_homed=True to run():
+        there's no re-derived cross-process trust involved, it's
+        literally the same in-memory controller that was just homed.
+        """
         self.config = config
-        self.motion = get_motion_controller(config)
+        self.motion = motion if motion is not None else get_motion_controller(config)
         self.ir_reader = get_ir_reader(config)
         self.spectrometer = get_spectrometer_reader(config)
 
@@ -153,7 +187,7 @@ class ScanManager:
             )
             self.motion.resume()
 
-    def run(self, on_point=None, stop_event=None):
+    def run(self, on_point=None, stop_event=None, already_homed=False):
         """
         on_point: optional callback(record: dict) -> None, invoked after each
         point (including reference-point revisits) has been written to disk.
@@ -167,12 +201,44 @@ class ScanManager:
         (between points, not mid-point). Setting it stops the scan after
         the in-flight point finishes and is written — logged as an abort,
         not as "Scan complete".
+
+        already_homed: set True ONLY when the caller has already called
+        home() on THIS SAME self.motion instance, earlier in this same
+        process (e.g. calibrate_scan_area.py's combined calibrate-then-
+        scan flow, right after it homes and jogs to the wafer edges).
+        Skips the redundant "scan start" rehome below.
+
+        Why this is safe here but wasn't safe as soft-home's cross-
+        process resume(): the picomotor is open-loop, so home() always
+        drives the full home_steps/home_velocity distance regardless of
+        whether it's already at the stop — calling it twice back-to-back
+        (once in the caller's own home(), once again here) burns real
+        time for zero benefit when it's the same physical session. But
+        that's only true when it's genuinely the same in-memory
+        controller object that was just homed, not a fresh connection in
+        a new process trusting the hardware's register persisted (that
+        unverified assumption is what caused the 2026-07-17 incident —
+        see MEMORY carat_scanner_2026-07-17_scan_diagnosis). Do NOT set
+        already_homed=True across a process boundary; only when self.motion
+        was passed in already-homed via __init__'s `motion=` param.
+
+        Periodic mid-scan rehomes (scan.rehome, if enabled) are
+        unaffected by this flag — those still run normally regardless,
+        since they exist to correct drift accumulated mid-scan.
         """
         self.logger.write_metadata()
         self.logger.log_event(f"Scan started ({self.passes} pass"
                                f"{'es' if self.passes != 1 else ''})")
 
-        self._safe_rehome("scan start")
+        if already_homed:
+            self.logger.log_event(
+                "Skipping scan-start rehome: motion controller was already "
+                "homed earlier in this same session (combined calibrate-"
+                "then-scan flow) — re-homing again would just re-drive the "
+                "same physical hard stop a second time for no benefit."
+            )
+        else:
+            self._safe_rehome("scan start")
         self.spectrometer.set_integration_time(self.oes_cfg["integration_time_us"])
 
         points, _, _ = generate_grid(self.scan_cfg)
@@ -440,6 +506,11 @@ if __name__ == "__main__":
         config["scan"]["grid"]["x_range_mm"] = [0, 4]
         config["scan"]["grid"]["y_range_mm"] = [0, 4]
         config["scan"]["grid"]["step_size_mm"] = 2.0
+        # Force no circular mask for the smoke test regardless of what's
+        # calibrated in the real config — wafer_center_mm there could be
+        # far outside this shrunk 4x4 test box, which would mask out
+        # every point and silently "succeed" at measuring nothing.
+        config["scan"]["grid"]["wafer_radius_mm"] = None
         config["scan"]["dwell_time_s"] = 2.0
         config["scan"]["settle_time_s"] = 0.0
         config["scan"]["reference_point"]["enabled"] = True

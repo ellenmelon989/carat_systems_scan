@@ -297,6 +297,38 @@ class NewportPicomotorController(MotionController):
                 "home() would set it to right after zeroing."
             )
 
+    def zero_here(self):
+        """
+        Zero BOTH axes at the stage's current physical position,
+        unconditionally — regardless of self._hard_home. This is the
+        "soft home" primitive exposed directly (not gated behind hard_home
+        the way home() is), so a caller that has already jogged to and
+        visually confirmed a fixed reference mark can anchor the origin
+        there without accidentally triggering a mechanical hard-stop
+        drive if hard_home happens to be True in config.
+
+        Unlike home(), this never drives anywhere — it just labels
+        wherever the stage currently is as (0, 0). It's only as
+        trustworthy as the caller's confirmation that "wherever the
+        stage currently is" is actually the intended reference point;
+        calibrate_scan_area.py's clearance check + reference-mark jog
+        loop is what provides that confirmation. See MEMORY
+        carat_scanner_2026-07-17_scan_diagnosis for the fiducial-homing
+        rationale (avoids ever needing to characterize home_steps/
+        home_velocity or drive into a hard mechanical stop at all).
+        """
+        logger.info("Zeroing X (axis %d) at current position", self._axis_x)
+        self._stage.set_position_reference(axis=self._axis_x, position=0)
+        logger.info("Zeroing Y (axis %d) at current position", self._axis_y)
+        self._stage.set_position_reference(axis=self._axis_y, position=0)
+        self._origin_x = self._stage.get_position(axis=self._axis_x)
+        self._origin_y = self._stage.get_position(axis=self._axis_y)
+        self._homed = True
+        logger.info(
+            "Zeroed at current position. Step origin: X=%d, Y=%d",
+            self._origin_x, self._origin_y,
+        )
+
     def move_to(self, x_mm: float, y_mm: float):
         """
         Absolute move to (x_mm, y_mm) in scan-grid coordinates.

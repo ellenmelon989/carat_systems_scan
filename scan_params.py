@@ -65,6 +65,19 @@ def grid_dims_from_range(x_range_mm, y_range_mm, step_size_mm: float):
     a single point — this is how a 1D line scan falls naturally out of the
     2D grid machinery; "if X changes and Y doesn't, the map ends up a
     line" per spec, with no special-casing needed elsewhere in the code.
+
+    Rounds span/step_size to 6 decimal places before the integer round().
+    Without this, ordinary floating-point noise carried through
+    calibrate_scan_area.py's edge/steps-per-mm math (e.g. a span landing
+    at 74.99999999999999 instead of an intended 75.0) can fall on the
+    opposite side of round()'s tie-break boundary than the same nominal
+    value does after being serialized to config.yaml at 4 decimal places
+    and reloaded by scan_manager.py in a fresh process — silently
+    disagreeing on nx/ny between the calibration preview and the grid the
+    scan actually runs (seen 2026-07-17: preview said 8x8=64, scan ran
+    9x9=81). 6 decimal places (1e-6 mm) is far finer than any real
+    steps_per_mm calibration can resolve (~1e-4 mm at best), so this only
+    absorbs float noise — it never masks a real, intended distinction.
     """
     step_size_mm = validate_step_size_mm(step_size_mm)
 
@@ -72,13 +85,37 @@ def grid_dims_from_range(x_range_mm, y_range_mm, step_size_mm: float):
         span = abs(hi - lo)
         if span == 0:
             return 1
-        return int(round(span / step_size_mm)) + 1
+        ratio = round(span / step_size_mm, 6)
+        return int(round(ratio)) + 1
 
     x0, x1 = x_range_mm
     y0, y1 = y_range_mm
     nx = _dim(x0, x1)
     ny = _dim(y0, y1)
     return nx, ny
+
+
+def in_radius(x_mm: float, y_mm: float, center_mm, radius_mm: float) -> bool:
+    """
+    True if (x_mm, y_mm) is within radius_mm of center_mm.
+
+    Shared by scan_manager.generate_grid() (which grid points actually
+    get measured) and calibrate_scan_area.py's preview (how many points
+    that will be) so the two can't independently disagree the way the
+    rectangular-grid preview/execution counts once did (see
+    grid_dims_from_range()'s docstring and the 2026-07-17 diagnosis).
+
+    Exists because a rectangular scan range (x_range_mm x y_range_mm) is
+    a bounding box around a circular wafer, not the wafer itself — its
+    corners are, by construction, off-sample. Masking the grid down to a
+    circle means those corner points are never measured at all: no
+    wasted/meaningless off-wafer data, and no motion command is ever
+    issued to the largest-excursion points in the grid, which is also
+    where the mount's own separate mechanical travel limit (independent
+    of wafer shape) is most likely to be exceeded.
+    """
+    cx, cy = center_mm
+    return (x_mm - cx) ** 2 + (y_mm - cy) ** 2 <= radius_mm ** 2
 
 
 def validate_passes(passes: int) -> int:
@@ -108,6 +145,17 @@ if __name__ == "__main__":
     assert grid_dims_from_range([0, 0], [0, 40], 2.0) == (1, 21)  # degenerate X -> line scan
     assert grid_dims_from_range([10, 10], [5, 5], 2.0) == (1, 1)  # degenerate both -> point scan
 
+    # Regression for 2026-07-17: span/step landing exactly on round()'s
+    # .5 tie-break boundary (75mm / 10mm = 7.5) must resolve the SAME way
+    # whether fed the noisy live float (74.99999999999999, as computed
+    # in-process by calibrate_scan_area.py before writing to disk) or the
+    # clean value it round-trips to after being written at 4 decimal
+    # places and reloaded by scan_manager.py — otherwise the calibration
+    # preview and the executed scan silently disagree on grid size.
+    assert grid_dims_from_range([-50.84745762711864, 24.152542372881353],
+                                 [-57.77166437414029, 17.228335625859696], 10.0) == (9, 9)
+    assert grid_dims_from_range([-50.8475, 24.1525], [-57.7717, 17.2283], 10.0) == (9, 9)
+
     try:
         validate_step_size_mm(15)
         raise AssertionError("expected ValueError for step_size_mm out of range")
@@ -126,6 +174,13 @@ if __name__ == "__main__":
     except ValueError:
         pass
     assert validate_passes(3) == 3
+
+    # in_radius(): center included, a bounding-box corner excluded, a
+    # cardinal edge point included (on the circle, not past it).
+    assert in_radius(0, 0, (0, 0), 25.0) is True
+    assert in_radius(25, 25, (0, 0), 25.0) is False   # bounding-box corner, off-wafer
+    assert in_radius(25, 0, (0, 0), 25.0) is True     # exactly on the circle
+    assert in_radius(0, -25, (5, -5), 25.0) is True   # off-origin center
 
     est = estimate_scan_time_s(*grid_dims_from_range([0, 50], [0, 50], 2.0), dwell_time_s=8.0)
     print(f"26x26 grid @ 8s dwell, 1 pass -> {est/60:.1f} min estimated scan time")

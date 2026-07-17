@@ -61,6 +61,26 @@ class MotionController(ABC):
         """Block until the mirror has settled after a move."""
         raise NotImplementedError
 
+    @abstractmethod
+    def zero_here(self):
+        """
+        Zero the origin at the stage's CURRENT physical position,
+        unconditionally — unlike home(), this is never gated by
+        motion.hard_home and never drives toward a mechanical stop.
+
+        Exists for fiducial-based homing: a caller that has already
+        jogged to, and had an operator visually confirm, a fixed
+        reference mark can anchor the origin there directly. This avoids
+        driving into a hard mechanical stop at all (no home_steps/
+        home_velocity to characterize, no stall-contact risk, no blind
+        step-count timing) — the origin is instead only as good as the
+        operator's visual confirmation, which is the same verification
+        already relied on for the wafer-edge jogs in
+        calibrate_scan_area.py. See that script's clearance-check +
+        reference-mark jog for how this gets called safely.
+        """
+        raise NotImplementedError
+
     def check_limits(self, x_mm, y_mm, limits):
         """Raise ValueError if (x_mm, y_mm) is outside soft limits."""
         if not (limits["x_min_mm"] <= x_mm <= limits["x_max_mm"]):
@@ -131,6 +151,11 @@ class MockMotionController(MotionController):
 
     def wait_for_settle(self, settle_time_s):
         time.sleep(settle_time_s)
+
+    def zero_here(self):
+        print("[MockMotion] Zeroing at current position (fiducial reference)")
+        self._position = (0.0, 0.0)
+        self._homed = True
 
 
 def get_motion_controller(config):
