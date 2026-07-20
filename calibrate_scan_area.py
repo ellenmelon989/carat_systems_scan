@@ -144,7 +144,21 @@ CLEARANCE_CHECK_STEP_MM = 3.0
 # human watching at the moment it happens — a single checkpoint at t=0
 # doesn't extend to jog #47. This forces that same check periodically
 # throughout every jog, not just once before any of them start.
-JOG_CHECKPOINT_INTERVAL_MM = 10.0
+# Raised from a 10mm hardcoded value to a 100mm default (2026-07-20,
+# on-site feedback): 10mm was interrupting operators too often on ordinary
+# edge jogs (wafer edges are often tens of mm away), turning a safety
+# check into an annoyance that invites reflexively hitting "y" without
+# actually looking. Now operator-adjustable per session (prompted in
+# main()) rather than a fixed constant, since how naggy is "too naggy"
+# depends on wafer size/setup; 100mm is just the starting default.
+JOG_CHECKPOINT_INTERVAL_DEFAULT_MM = 100.0
+JOG_CHECKPOINT_INTERVAL_MIN_MM = 10.0    # below this, the check fires so
+                                          # often it stops being meaningful
+                                          # (same "reflexive y" problem)
+JOG_CHECKPOINT_INTERVAL_MAX_MM = 500.0   # above this, a real limit could be
+                                          # hit and gone uncaught for too
+                                          # long — matches this script's
+                                          # largest sane single edge jog
 
 try:
     import msvcrt  # Windows only
@@ -160,11 +174,11 @@ except ImportError:
 def _jog_checkpoint(moved_since_checkpoint_mm):
     """
     Force an explicit "are you still watching real motion?" confirmation
-    once cumulative jogging since the last checkpoint reaches
-    JOG_CHECKPOINT_INTERVAL_MM. See that constant's docstring for why a
-    single check at the start of a jog isn't enough — this is what
-    extends the same protection to every jog step along the way, not
-    just the first one.
+    once cumulative jogging since the last checkpoint reaches the
+    operator-set checkpoint interval (see JOG_CHECKPOINT_INTERVAL_DEFAULT_MM).
+    See that constant's docstring for why a single check at the start of
+    a jog isn't enough — this is what extends the same protection to
+    every jog step along the way, not just the first one.
 
     Raises RuntimeError (aborting the whole calibration) on "n", same
     policy as clearance_check() — a jog that isn't producing confirmed
@@ -184,7 +198,7 @@ def _jog_checkpoint(moved_since_checkpoint_mm):
         )
 
 
-def _jog_loop_msvcrt(motion, jog_step_mm):
+def _jog_loop_msvcrt(motion, jog_step_mm, checkpoint_interval_mm=JOG_CHECKPOINT_INTERVAL_DEFAULT_MM):
     """Windows: real arrow keys via msvcrt. Returns confirmed (x_mm, y_mm)."""
     print("  Arrow keys to jog, +/- to change step size, ENTER to confirm, q to abort.")
     moved_since_checkpoint = 0.0
@@ -220,13 +234,13 @@ def _jog_loop_msvcrt(motion, jog_step_mm):
                 motion.jog(dx_mm=jog_step_mm)
                 moved = jog_step_mm
             moved_since_checkpoint += moved
-            if moved_since_checkpoint >= JOG_CHECKPOINT_INTERVAL_MM:
+            if moved_since_checkpoint >= checkpoint_interval_mm:
                 print()
                 _jog_checkpoint(moved_since_checkpoint)
                 moved_since_checkpoint = 0.0
 
 
-def _jog_loop_typed(motion, jog_step_mm):
+def _jog_loop_typed(motion, jog_step_mm, checkpoint_interval_mm=JOG_CHECKPOINT_INTERVAL_DEFAULT_MM):
     """Fallback jog loop for non-Windows terminals: typed commands."""
     print("  Commands: w/s = Y +/-, a/d = X +/-, +/- = change step size, "
           "c = confirm, q = abort. Enter after each command.")
@@ -253,18 +267,19 @@ def _jog_loop_typed(motion, jog_step_mm):
             elif cmd == "d":
                 motion.jog(dx_mm=jog_step_mm)
             moved_since_checkpoint += jog_step_mm
-            if moved_since_checkpoint >= JOG_CHECKPOINT_INTERVAL_MM:
+            if moved_since_checkpoint >= checkpoint_interval_mm:
                 _jog_checkpoint(moved_since_checkpoint)
                 moved_since_checkpoint = 0.0
         else:
             print(f"  (unrecognized command {cmd!r})")
 
 
-def jog_to_edge(motion, edge_name, jog_step_mm=JOG_STEP_DEFAULT_MM):
+def jog_to_edge(motion, edge_name, jog_step_mm=JOG_STEP_DEFAULT_MM,
+                 checkpoint_interval_mm=JOG_CHECKPOINT_INTERVAL_DEFAULT_MM):
     print(f"\n--- {edge_name.upper()} EDGE ---")
     print(f"  {EDGE_PROMPTS[edge_name]}")
     loop = _jog_loop_msvcrt if _HAS_MSVCRT else _jog_loop_typed
-    x, y = loop(motion, jog_step_mm)
+    x, y = loop(motion, jog_step_mm, checkpoint_interval_mm)
     print(f"  Recorded {edge_name} edge at ({x:.3f}, {y:.3f}) mm")
     return x, y
 
@@ -494,6 +509,17 @@ def recommend_home_steps(edges: dict, spmm_result: dict, margin: float = 2.0) ->
     return int(max(steps_x, steps_y) * margin)
 
 
+def validate_jog_checkpoint_interval_mm(value: float) -> float:
+    """Raise ValueError if the jog checkpoint interval is outside the valid range."""
+    value = float(value)
+    if not (JOG_CHECKPOINT_INTERVAL_MIN_MM <= value <= JOG_CHECKPOINT_INTERVAL_MAX_MM):
+        raise ValueError(
+            f"checkpoint interval {value} outside valid range "
+            f"[{JOG_CHECKPOINT_INTERVAL_MIN_MM}, {JOG_CHECKPOINT_INTERVAL_MAX_MM}] mm"
+        )
+    return value
+
+
 def prompt_float(label, default, validator):
     while True:
         raw = input(f"  {label} [{default}]: ").strip()
@@ -547,6 +573,51 @@ def _patch_scalar(text: str, key: str, new_value: str) -> str:
     return pattern.sub(_replace, text, count=1)
 
 
+def _patch_or_insert_scalar(text: str, key: str, new_value: str, after_key: str) -> str:
+    """
+    Like _patch_scalar, but if `key:` isn't found in the file at all
+    (e.g. an on-site config.yaml predating a field this script later
+    grew — wafer_radius_mm and passes were both added after this script's
+    first release), INSERT a new `key: value` line immediately after the
+    line for `after_key` instead of raising.
+
+    Why this exists (2026-07-20 on-site incident): write_results() used
+    to build the whole patched file in memory and only call
+    config_path.write_text() once, at the very end. A single missing key
+    (an operator's config.yaml still missing wafer_radius_mm) raised
+    KeyError from _patch_scalar() partway through and aborted the whole
+    function BEFORE that final write_text() call — so NONE of the
+    already-computed x_range_mm/y_range_mm/wafer_center_mm/step_size_mm/
+    steps_per_mm_x/y etc. got saved either, silently discarding an
+    entire calibration session's results over one missing line, with no
+    indication to the operator that everything else was also lost.
+    Falling forward (insert rather than crash) for fields that are known
+    to be newer/optional keeps that failure contained to just this one
+    field instead of the whole write.
+    """
+    pattern = re.compile(
+        rf"^([ \t]*{re.escape(key)}:)[ \t]*([^#\r\n]*?)[ \t]*(#.*)?$",
+        re.MULTILINE,
+    )
+    if pattern.search(text):
+        return _patch_scalar(text, key, new_value)
+
+    anchor_pattern = re.compile(
+        rf"^([ \t]*){re.escape(after_key)}:[^\r\n]*$",
+        re.MULTILINE,
+    )
+    m = anchor_pattern.search(text)
+    if not m:
+        raise KeyError(
+            f"Could not find a '{key}:' line to patch, and its insertion anchor "
+            f"'{after_key}:' is also missing from the config file — this field "
+            "was not written. Add it manually."
+        )
+    indent = m.group(1)
+    insert_at = m.end()
+    return text[:insert_at] + f"\n{indent}{key}: {new_value}" + text[insert_at:]
+
+
 def write_results(config_path: Path, results: dict):
     """
     Patch config.yaml with the calibration results.
@@ -558,34 +629,62 @@ def write_results(config_path: Path, results: dict):
     and home_steps (if the operator chose to write the suggested homing
     bound) — both optional scalars, patched the same way as everything
     else, one dict in rather than separate parameters.
+
+    Each field is patched independently and failures are collected
+    rather than raised immediately — see _patch_or_insert_scalar's
+    docstring for why an all-or-nothing write is dangerous here. Whatever
+    DID succeed is still written to disk even if some field failed, and
+    the operator gets a clear report of exactly what didn't make it in
+    (and why) instead of a stack trace and a config.yaml that silently
+    still has last week's placeholder values.
     """
     text = config_path.read_text(encoding="utf-8-sig")
+    failed = []
+
+    def _try(fn, label, *args):
+        nonlocal text
+        try:
+            text = fn(text, *args)
+        except KeyError as e:
+            failed.append((label, str(e)))
 
     for key in ("x_range_mm", "y_range_mm", "wafer_center_mm"):
         lo, hi = results[key]
-        text = _patch_scalar(
-            text, key,
-            f"[{lo:.{CONFIG_RANGE_DECIMALS}f}, {hi:.{CONFIG_RANGE_DECIMALS}f}]",
-        )
+        _try(_patch_scalar, key, key,
+             f"[{lo:.{CONFIG_RANGE_DECIMALS}f}, {hi:.{CONFIG_RANGE_DECIMALS}f}]")
 
-    text = _patch_scalar(
-        text, "wafer_radius_mm", f"{results['wafer_radius_mm']:.{CONFIG_RANGE_DECIMALS}f}",
-    )
+    # wafer_radius_mm and passes are newer fields (added 2026-07-17 and
+    # 2026-07-15 respectively) that an older on-site config.yaml may not
+    # have yet — insert rather than require they already exist.
+    _try(_patch_or_insert_scalar, "wafer_radius_mm", "wafer_radius_mm",
+         f"{results['wafer_radius_mm']:.{CONFIG_RANGE_DECIMALS}f}", "wafer_center_mm")
 
-    text = _patch_scalar(text, "step_size_mm", f"{results['step_size_mm']}")
-    text = _patch_scalar(text, "dwell_time_s", f"{results['dwell_time_s']}")
-    text = _patch_scalar(text, "passes", f"{results['passes']}")
+    _try(_patch_scalar, "step_size_mm", "step_size_mm", f"{results['step_size_mm']}")
+    _try(_patch_scalar, "dwell_time_s", "dwell_time_s", f"{results['dwell_time_s']}")
+    _try(_patch_or_insert_scalar, "passes", "passes", f"{results['passes']}", "dwell_time_s")
 
     if "steps_per_mm_x" in results:
-        text = _patch_scalar(text, "steps_per_mm_x", f"{results['steps_per_mm_x']:.4f}")
-        text = _patch_scalar(text, "steps_per_mm_y", f"{results['steps_per_mm_y']:.4f}")
-        text = _patch_scalar(text, "calibration_date", f'"{date.today().isoformat()}"')
+        _try(_patch_scalar, "steps_per_mm_x", "steps_per_mm_x", f"{results['steps_per_mm_x']:.4f}")
+        _try(_patch_scalar, "steps_per_mm_y", "steps_per_mm_y", f"{results['steps_per_mm_y']:.4f}")
+        _try(_patch_or_insert_scalar, "calibration_date", "calibration_date",
+             f'"{date.today().isoformat()}"', "steps_per_mm_y")
 
     if "home_steps" in results:
-        text = _patch_scalar(text, "home_steps", f"{results['home_steps']}")
+        _try(_patch_or_insert_scalar, "home_steps", "home_steps",
+             f"{results['home_steps']}", "calibration_direction")
 
     config_path.write_text(text, encoding="utf-8")
-    print(f"\nWrote calibration results to {config_path}")
+
+    if failed:
+        print(f"\nWrote PARTIAL calibration results to {config_path} — "
+              f"{len(failed)} field(s) could NOT be written:")
+        for label, msg in failed:
+            print(f"  - {label}: {msg}")
+        print("  Everything else above was saved. Add the missing line(s) to "
+              "config.yaml by hand (see the values printed earlier in this run), "
+              "then re-run calibration or edit config.yaml directly.")
+    else:
+        print(f"\nWrote calibration results to {config_path}")
 
 
 # ---------------------------------------------------------------------------
@@ -609,6 +708,13 @@ def main():
     )
 
     motion = get_motion_controller(config)
+
+    checkpoint_interval_mm = prompt_float(
+        f"Jog checkpoint interval mm — how far to jog before re-confirming "
+        f"real motion (range {JOG_CHECKPOINT_INTERVAL_MIN_MM}-{JOG_CHECKPOINT_INTERVAL_MAX_MM})",
+        JOG_CHECKPOINT_INTERVAL_DEFAULT_MM,
+        validate_jog_checkpoint_interval_mm,
+    )
 
     # Fiducial homing instead of driving into a mechanical hard stop:
     # avoids ever needing to characterize home_steps/home_velocity, avoids
@@ -638,14 +744,14 @@ def main():
     # silently fails against a limit it's already sitting at.
     clearance_check(motion)
 
-    ref_x, ref_y = jog_to_edge(motion, "reference")
+    ref_x, ref_y = jog_to_edge(motion, "reference", checkpoint_interval_mm=checkpoint_interval_mm)
     motion.zero_here()
     print(f"  Origin zeroed at reference mark (was at {ref_x:.3f}, {ref_y:.3f} mm "
           "in the provisional frame).")
 
     edges = {}
     for edge_name in EDGE_ORDER:
-        edges[edge_name] = jog_to_edge(motion, edge_name)
+        edges[edge_name] = jog_to_edge(motion, edge_name, checkpoint_interval_mm=checkpoint_interval_mm)
 
     spmm_result = calibrate_steps_per_mm(edges, config)
     if spmm_result is not None:
