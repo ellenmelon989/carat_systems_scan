@@ -189,8 +189,11 @@ class ScanManager:
 
     def run(self, on_point=None, stop_event=None, already_homed=False):
         """
-        on_point: optional callback(record: dict) -> None, invoked after each
-        point (including reference-point revisits) has been written to disk.
+        on_point: optional callback(record: dict, ix: int | None, iy: int | None)
+        -> None, invoked after each point (including reference-point
+        revisits) has been written to disk. ix/iy are the grid indices
+        (None for reference-point revisits, which aren't part of the
+        spatial grid — same convention DataLogger/OESStore already use).
         Lets a caller (e.g. a GUI) observe progress without scan_manager
         knowing anything about what's consuming it. Called from whatever
         thread run() executes on — the caller is responsible for any
@@ -207,6 +210,15 @@ class ScanManager:
         process (e.g. calibrate_scan_area.py's combined calibrate-then-
         scan flow, right after it homes and jogs to the wafer edges).
         Skips the redundant "scan start" rehome below.
+
+        Returns one of "completed" / "aborted" / "axis_fault" -- callers
+        that only care about success/failure for a log line can ignore
+        it (the CLI __main__ block below does), but a caller driving a
+        UI needs to tell these apart: "aborted" was requested by the
+        operator (stop_event), "axis_fault" means the scan stopped
+        itself after an AxisStateUnknown fault and needs a manual
+        hardware check before scanning again -- very much NOT the same
+        as a normal "Scan complete".
 
         Why this is safe here but wasn't safe as soft-home's cross-
         process resume(): the picomotor is open-loop, so home() always
@@ -270,7 +282,7 @@ class ScanManager:
                     if stop_event is not None and stop_event.is_set():
                         self.logger.log_event(f"Scan aborted by operator after point {point_id} "
                                                f"(pass {pass_id + 1}/{self.passes})")
-                        return
+                        return "aborted"
 
                     self._measure_point(point_id, ix, iy, x, y, pass_id=pass_id, on_point=on_point)
                     point_id += 1
@@ -303,11 +315,12 @@ class ScanManager:
                 "after a motion fault. Check the hardware (mechanical "
                 "binding, cabling, 8742 connection) before running again."
             )
-            return
+            return "axis_fault"
 
         self.logger.log_event(f"Scan complete ({self.passes} pass"
                                f"{'es' if self.passes != 1 else ''}, "
                                f"{point_id} total points written)")
+        return "completed"
 
     def _measure_point(self, point_id, ix, iy, x, y, pass_id=0, is_reference=False, on_point=None):
         limits = self.config["motion"]["soft_limits"]
@@ -357,7 +370,7 @@ class ScanManager:
         )
 
         if on_point is not None:
-            on_point(record)
+            on_point(record, ix, iy)
 
         tag = "REF" if is_reference else "PT"
         pass_tag = f" pass={pass_id + 1}/{self.passes}" if self.passes > 1 else ""
