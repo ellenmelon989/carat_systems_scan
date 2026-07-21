@@ -21,9 +21,23 @@ import traceback
 from scan_manager import ScanManager
 
 
-def run_scan(config, q, stop_event):
+def run_scan(config, q, stop_event, motion=None, already_homed=False):
     """
     Entry point for the worker thread.
+
+    motion: optional, pre-connected MotionController handed off from
+    app.py (see App._handle_calibrated) -- e.g. one the Calibrate tab
+    already connected and homed. None (the default) preserves the
+    original behavior: ScanManager builds its own via
+    get_motion_controller(config). Passed straight through to
+    ScanManager's own `motion=` param -- see its docstring for why
+    reusing the SAME object is what makes already_homed=True safe.
+
+    already_homed: forwarded to ScanManager.run() -- True only means
+    "this exact motion object was already homed earlier in this same
+    process," never anything about a previous process/run. app.py is
+    responsible for only ever setting it True immediately after a
+    hand-off (see the one-shot _pending_already_homed flag there).
 
     Puts one of the following onto q as the scan progresses:
       ("point", record)  -- once per point, forwarded straight from
@@ -47,7 +61,7 @@ def run_scan(config, q, stop_event):
     indication anything went wrong.
     """
     try:
-        manager = ScanManager(config)
+        manager = ScanManager(config, motion=motion)
     except Exception as exc:
         q.put(("error", _format_error("Failed to initialize scan hardware", exc)))
         return
@@ -61,6 +75,7 @@ def run_scan(config, q, stop_event):
             # has to deal with one dict per point, not a 3-tuple.
             on_point=lambda record, ix, iy: q.put(("point", {**record, "ix": ix, "iy": iy})),
             stop_event=stop_event,
+            already_homed=already_homed,
         )
     except Exception as exc:
         q.put(("error", _format_error("Scan failed", exc)))

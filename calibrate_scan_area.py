@@ -686,6 +686,13 @@ def write_results(config_path: Path, results: dict):
     else:
         print(f"\nWrote calibration results to {config_path}")
 
+    # Returned (in addition to the print()s above) so a non-console caller —
+    # gui/calibration_panel.py's Calibrate tab — can show the operator the
+    # same "which fields failed" detail in a dialog instead of only on
+    # stdout. The __main__ flow below ignores this; existing behavior for
+    # standalone `python calibrate_scan_area.py` runs is unchanged.
+    return failed
+
 
 # ---------------------------------------------------------------------------
 # Main

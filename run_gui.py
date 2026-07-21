@@ -32,7 +32,11 @@ def main():
     with open(args.config) as f:
         config = yaml.safe_load(f)
 
-    app = App(config)
+    # config_path is threaded through to the Calibrate tab (see
+    # gui/calibration_panel.py) so it can patch the SAME file that was
+    # just loaded here, exactly like calibrate_scan_area.py's own
+    # `python calibrate_scan_area.py [config.yaml]` usage.
+    app = App(config, args.config)
     app.mainloop()
 
 
