@@ -80,8 +80,22 @@ POSITION_POLL_INTERVAL_MS = 300  # live position/signal readout cadence while co
 
 
 class AdaptiveScanPanel(ttk.Frame):
+    """
+    This tab's content (jog pad, the 7-parameter form, log, and heatmap)
+    adds up to more vertical space than the other tabs -- taller than a
+    lot of screens can show at once, especially at 100% Tk scaling on a
+    laptop display. Rather than trust every user's screen to be big
+    enough (see the module docstring's "cut off" fix, 2026-07): this
+    whole panel is built inside a scrollable canvas (self._canvas /
+    self.content below), so nothing is ever truly inaccessible -- if the
+    window is too short to show everything at once, the operator scrolls
+    (mouse wheel or the scrollbar) instead of losing the bottom of the
+    tab. Every _build_* method below parents its widgets to self.content
+    (the scrollable inner frame), not to `self` directly.
+    """
+
     def __init__(self, parent, config):
-        super().__init__(parent, padding=8)
+        super().__init__(parent, padding=0)
         self.config = config
         self.oes_features_cfg = config.get("oes", {}).get("features", {})
         self.feature_window_nm = config.get("oes", {}).get("feature_window_nm", 1.0)
@@ -101,8 +115,11 @@ class AdaptiveScanPanel(ttk.Frame):
         self._current_outdir = None
         self._cbar = None
 
-        self.columnconfigure(0, weight=1)
-        self.columnconfigure(1, weight=1)
+        self._build_scroll_container()
+
+        self.content.columnconfigure(0, weight=1)
+        self.content.columnconfigure(1, weight=1)
+        self.content.rowconfigure(3, weight=1)
 
         self._build_connection_row()
         self._build_jog_pad()
@@ -113,11 +130,61 @@ class AdaptiveScanPanel(ttk.Frame):
         self._set_jog_enabled(False)
 
     # ------------------------------------------------------------------
+    # Scrollable container
+    # ------------------------------------------------------------------
+
+    def _build_scroll_container(self):
+        """
+        Standard Tk scrollable-frame pattern: a Canvas + Scrollbar owned
+        by this Frame, with self.content (a plain ttk.Frame) embedded
+        inside the canvas as the actual parent for every widget this tab
+        builds. self.content's width is kept in sync with the canvas's
+        visible width (so sticky="we"/"nsew" widgets inside it lay out
+        correctly), and its scrollregion is kept in sync with its own
+        requested height (so the scrollbar's range always matches the
+        real content, including whenever the coarse-grid heatmap or log
+        text grows the content taller after the panel is first built).
+        """
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        self._canvas = tk.Canvas(self, highlightthickness=0)
+        vscroll = ttk.Scrollbar(self, orient="vertical", command=self._canvas.yview)
+        self._canvas.configure(yscrollcommand=vscroll.set)
+        self._canvas.grid(row=0, column=0, sticky="nsew")
+        vscroll.grid(row=0, column=1, sticky="ns")
+
+        self.content = ttk.Frame(self._canvas, padding=8)
+        self._content_window = self._canvas.create_window((0, 0), window=self.content, anchor="nw")
+
+        def _on_content_configure(event):
+            self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+
+        def _on_canvas_configure(event):
+            # Keep the embedded frame exactly as wide as the visible
+            # canvas, so sticky="we"/"nsew" widgets inside it can actually
+            # expand -- without this, self.content only ever gets its own
+            # *requested* width, ignoring how much room the tab actually has.
+            self._canvas.itemconfig(self._content_window, width=event.width)
+
+        self.content.bind("<Configure>", _on_content_configure)
+        self._canvas.bind("<Configure>", _on_canvas_configure)
+
+        # Mouse-wheel scrolling, bound only while the pointer is actually
+        # over this tab's canvas (not bind_all) -- so it doesn't hijack
+        # scrolling on the Calibrate/Scan tabs or elsewhere in the window.
+        def _on_mousewheel(event):
+            self._canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        self._canvas.bind("<Enter>", lambda e: self._canvas.bind_all("<MouseWheel>", _on_mousewheel))
+        self._canvas.bind("<Leave>", lambda e: self._canvas.unbind_all("<MouseWheel>"))
+
+    # ------------------------------------------------------------------
     # Layout
     # ------------------------------------------------------------------
 
     def _build_connection_row(self):
-        row = ttk.Frame(self)
+        row = ttk.Frame(self.content)
         row.grid(row=0, column=0, columnspan=2, sticky="we")
 
         self.connect_btn = ttk.Button(row, text="Connect", command=self._handle_connect)
@@ -130,7 +197,7 @@ class AdaptiveScanPanel(ttk.Frame):
         ttk.Label(row, textvariable=self.live_signal_var).grid(row=1, column=1, padx=(12, 0), sticky="w")
 
     def _build_jog_pad(self):
-        frame = ttk.LabelFrame(self, text="Jog to a valid wafer signal", padding=8)
+        frame = ttk.LabelFrame(self.content, text="Jog to a valid wafer signal", padding=8)
         frame.grid(row=1, column=0, sticky="nw", pady=(8, 0))
 
         ttk.Label(frame, text="Jog step (mm)").grid(row=0, column=0, columnspan=2, sticky="w")
@@ -161,7 +228,7 @@ class AdaptiveScanPanel(ttk.Frame):
         validation with a clear message rather than silently running with
         a guessed value.
         """
-        frame = ttk.LabelFrame(self, text="Adaptive scan parameters", padding=8)
+        frame = ttk.LabelFrame(self.content, text="Adaptive scan parameters", padding=8)
         frame.grid(row=1, column=1, sticky="new", pady=(8, 0))
 
         r = 0
@@ -245,17 +312,17 @@ class AdaptiveScanPanel(ttk.Frame):
             row=r + 1, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
     def _build_log(self):
-        ttk.Label(self, text="Log").grid(row=2, column=0, sticky="w", pady=(8, 0))
-        self.log = ScrolledText(self, height=14, width=52, state="disabled")
+        ttk.Label(self.content, text="Log").grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.log = ScrolledText(self.content, height=12, width=52, state="disabled")
         self.log.grid(row=3, column=0, sticky="nsew")
 
     def _build_results(self):
-        ttk.Label(self, text="Coarse map (after scan completes)").grid(
+        ttk.Label(self.content, text="Coarse map (after scan completes)").grid(
             row=2, column=1, sticky="w", pady=(8, 0))
-        self.figure = Figure(figsize=(4.2, 4.2), dpi=100)
+        self.figure = Figure(figsize=(3.8, 3.8), dpi=100)
         self.ax = self.figure.add_subplot(111)
         self.ax.set_title("No data yet")
-        self.canvas = FigureCanvasTkAgg(self.figure, master=self)
+        self.canvas = FigureCanvasTkAgg(self.figure, master=self.content)
         self.canvas.get_tk_widget().grid(row=3, column=1, sticky="nsew")
         self.canvas.draw_idle()
 
