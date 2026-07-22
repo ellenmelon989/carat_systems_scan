@@ -14,15 +14,34 @@ Implements:
   the scan, not just the one fixed reference point. Defaults to 1 pass
   (old behavior). See OESStore's pass_id axis for how repeats are
   preserved rather than overwriting each other on disk.
+Lives in scan/ (see scan/__init__.py) alongside scan_params.py,
+data_logger.py, oes_store.py, calibrate_scan_area.py, and map_plotter.py —
+the precision, absolute-position scan path, kept separate from
+adaptive_scan/'s open-loop-safe edge-following mode.
 """
+# --- repo-root import bootstrap -------------------------------------------
+# Lets this file be run directly (`python scan/scan_manager.py`), as a
+# module (`python -m scan.scan_manager`), or imported from elsewhere in the
+# repo (e.g. gui/, via `python run_gui.py`) -- all three need the repo root
+# on sys.path so sibling top-level packages (motion/, readers/) and this
+# file's own package (scan/) resolve the same way regardless of how it was
+# invoked. See adaptive_scan/adaptive_scan.py for the same pattern.
+import os as _os
+import sys as _sys
+
+_REPO_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _REPO_ROOT not in _sys.path:
+    _sys.path.insert(0, _REPO_ROOT)
+# ---------------------------------------------------------------------------
+
 import numpy as np
 
 from motion.motion_controller import get_motion_controller, AxisStateUnknown
 from readers.ir_reader_base import get_ir_reader
 from readers.spectrometer_reader_base import get_spectrometer_reader
-from data_logger import DataLogger, build_point_record
-from oes_store import OESStore
-from scan_params import (
+from scan.data_logger import DataLogger, build_point_record
+from scan.oes_store import OESStore
+from scan.scan_params import (
     PASSES_DEFAULT,
     grid_dims_from_range,
     in_radius,
@@ -133,7 +152,7 @@ def preflight_check(config):
 
     Called from ScanManager.__init__ before anything else happens (see
     there), and also runnable standalone via
-    `python scan_manager.py --check-only` for a zero-hardware, sub-
+    `python scan/scan_manager.py --check-only` for a zero-hardware, sub-
     second sanity check of a config file.
 
     NOTE on what this does and doesn't prove: this checks that the
@@ -170,7 +189,7 @@ class ScanManager:
         """
         motion: optional, pre-constructed MotionController. Defaults to
         None, which builds a fresh one via get_motion_controller(config)
-        exactly as before — standalone `python scan_manager.py` is
+        exactly as before — standalone `python scan/scan_manager.py` is
         unaffected.
 
         Pass an existing (already-connected, already-homed) controller
@@ -602,7 +621,7 @@ if __name__ == "__main__":
             "default step size, uses the minimum valid dwell time (2s), "
             "and writes to ./scan_data_smoketest instead of the configured "
             "output dir. Does not modify config.yaml on disk. Without this "
-            "flag, `python scan_manager.py` runs exactly what's in "
+            "flag, `python scan/scan_manager.py` runs exactly what's in "
             "config.yaml — no silent overrides."
         ),
     )

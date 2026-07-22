@@ -15,7 +15,7 @@ import copy
 import tkinter as tk
 from tkinter import ttk, messagebox
 
-from scan_params import (
+from scan.scan_params import (
     DWELL_TIME_DEFAULT_S, DWELL_TIME_MIN_S, DWELL_TIME_MAX_S,
     STEP_SIZE_DEFAULT_MM, STEP_SIZE_MIN_MM, STEP_SIZE_MAX_MM,
     PASSES_DEFAULT, PASSES_MIN, PASSES_MAX,

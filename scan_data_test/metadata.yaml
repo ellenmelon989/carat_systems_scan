@@ -8,4 +8,4 @@ config:
     spectra_subdir: spectra
     summary_csv: scan_summary.csv
 operator: test
-scan_started: '2026-07-21T21:13:46.762614'
+scan_started: '2026-07-22T16:54:48.489347'

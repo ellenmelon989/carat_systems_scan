@@ -18,7 +18,7 @@ Threading contract (see memory: carat_scanner_gui_scan_connection):
 
 import traceback
 
-from scan_manager import ScanManager
+from scan.scan_manager import ScanManager
 
 
 def run_scan(config, q, stop_event, motion=None, already_homed=False):

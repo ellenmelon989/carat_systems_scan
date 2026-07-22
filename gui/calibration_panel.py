@@ -34,8 +34,8 @@ from tkinter.scrolledtext import ScrolledText
 import yaml
 
 from motion.motion_controller import get_motion_controller
-import scan_params
-from calibrate_scan_area import (
+import scan.scan_params as scan_params
+from scan.calibrate_scan_area import (
     CLEARANCE_CHECK_STEP_MM,
     CONFIG_RANGE_DECIMALS,
     EDGE_ORDER,
@@ -53,7 +53,7 @@ from calibrate_scan_area import (
     validate_jog_checkpoint_interval_mm,
     write_results,
 )
-from scan_manager import generate_grid
+from scan.scan_manager import generate_grid
 
 # Arrow keysym -> (dx_sign, dy_sign). Matches the msvcrt jog loop's
 # convention in calibrate_scan_area.py (Up/Down = Y, Left/Right = X).

@@ -35,8 +35,8 @@ from gui.control_panel import ControlPanel
 from gui.status_panel import StatusPanel
 from gui.live_map import LiveMapPanel
 from gui.scan_worker import run_scan
-from scan_manager import generate_grid
-from scan_params import PASSES_DEFAULT, validate_passes
+from scan.scan_manager import generate_grid
+from scan.scan_params import PASSES_DEFAULT, validate_passes
 
 POLL_INTERVAL_MS = 150
 

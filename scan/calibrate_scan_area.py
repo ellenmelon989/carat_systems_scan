@@ -10,7 +10,7 @@ Run this after installation, or whenever the scanner is physically moved.
 
 Usage
 -----
-    python calibrate_scan_area.py [config.yaml]
+    python scan/calibrate_scan_area.py [config.yaml]
 
 Workflow
 --------
@@ -80,6 +80,19 @@ this stage; watch the mirror.
 
 from __future__ import annotations
 
+# --- repo-root import bootstrap -------------------------------------------
+# See scan/scan_manager.py's own copy of this comment for the full
+# rationale -- lets this file run directly, as a module, or be imported
+# from elsewhere (e.g. gui/calibration_panel.py), all resolving motion/ and
+# scan.scan_params/scan.scan_manager the same way regardless of invocation.
+import os as _os
+import sys as _sys
+
+_REPO_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _REPO_ROOT not in _sys.path:
+    _sys.path.insert(0, _REPO_ROOT)
+# ---------------------------------------------------------------------------
+
 import re
 import sys
 from datetime import date
@@ -88,7 +101,7 @@ from pathlib import Path
 import yaml
 
 from motion.motion_controller import get_motion_controller
-import scan_params
+import scan.scan_params as scan_params
 
 JOG_STEP_DEFAULT_MM = 1.0
 JOG_STEP_MIN_MM = 0.05
@@ -690,7 +703,7 @@ def write_results(config_path: Path, results: dict):
     # gui/calibration_panel.py's Calibrate tab — can show the operator the
     # same "which fields failed" detail in a dialog instead of only on
     # stdout. The __main__ flow below ignores this; existing behavior for
-    # standalone `python calibrate_scan_area.py` runs is unchanged.
+    # standalone `python scan/calibrate_scan_area.py` runs is unchanged.
     return failed
 
 
@@ -817,7 +830,7 @@ def main():
     # motivation as CONFIG_RANGE_DECIMALS above: preview and execution
     # must derive from identical logic, not two separately-computed
     # numbers that happen to usually agree.
-    from scan_manager import generate_grid
+    from scan.scan_manager import generate_grid
     preview_scan_cfg = {
         "grid": {
             "x_range_mm": area["x_range_mm"],
@@ -859,7 +872,7 @@ def main():
     if input("\nRun the scan now using this calibration? [y/N] ").strip().lower() == "y":
         # Reload config.yaml so the scan sees the just-written range/
         # step_size/dwell_time/passes exactly as a standalone
-        # `python scan_manager.py` run would — but reuse THIS SAME
+        # `python scan/scan_manager.py` run would — but reuse THIS SAME
         # `motion` object (already connected, already homed at the top
         # of this script) instead of letting ScanManager build a second
         # connection and re-home. Since the picomotor is open-loop, a
@@ -869,7 +882,7 @@ def main():
         # already sitting at a verified origin. See ScanManager's
         # `motion=`/`already_homed=` params for why reusing the object
         # (not just trusting a fresh one) is what makes this safe.
-        from scan_manager import ScanManager
+        from scan.scan_manager import ScanManager
         scan_config = yaml.safe_load(config_path.read_text(encoding="utf-8-sig"))
         print("\nStarting scan with this calibration...")
         manager = ScanManager(scan_config, motion=motion)

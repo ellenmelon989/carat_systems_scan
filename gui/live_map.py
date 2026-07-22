@@ -17,7 +17,7 @@ from tkinter import ttk
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from scan_params import grid_dims_from_range
+from scan.scan_params import grid_dims_from_range
 
 
 class LiveMapPanel(ttk.Frame):
