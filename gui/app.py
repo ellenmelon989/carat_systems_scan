@@ -15,13 +15,18 @@ worker thread never receives a reference to any widget -- it only
 ever gets the config dict, the queue, the stop_event, and (see below)
 an optional already-connected motion controller.
 
-Two tabs, one window: "Calibrate" (gui/calibration_panel.py) and
-"Scan" (the ControlPanel/StatusPanel/LiveMapPanel trio that already
-existed here). Calibration and scanning share this one App instance so
-a motion controller connected and homed on the Calibrate tab can be
-handed straight to a scan without a second hardware connection or a
-redundant re-home -- see _handle_calibrated()/start_scan() below and
-ScanManager's motion=/already_homed= params.
+Three tabs, one window: "Calibrate" (gui/calibration_panel.py), "Scan"
+(the ControlPanel/StatusPanel/LiveMapPanel trio that already existed
+here), and "Adaptive Scan" (gui/adaptive_scan_panel.py). Calibration and
+Scan share this one App instance so a motion controller connected and
+homed on the Calibrate tab can be handed straight to a scan without a
+second hardware connection or a redundant re-home -- see
+_handle_calibrated()/start_scan() below and ScanManager's
+motion=/already_homed= params. Adaptive Scan does NOT participate in that
+hand-off -- it opens its own, independent motion/reader connection (see
+gui/adaptive_scan_panel.py's docstring for why) -- so it only needs its
+own shutdown() called alongside the Calibrate tab's, not a place in the
+Calibrate -> Scan hand-off chain.
 """
 
 import queue
@@ -35,6 +40,7 @@ from gui.control_panel import ControlPanel
 from gui.status_panel import StatusPanel
 from gui.live_map import LiveMapPanel
 from gui.scan_worker import run_scan
+from gui.adaptive_scan_panel import AdaptiveScanPanel
 from scan.scan_manager import generate_grid
 from scan.scan_params import PASSES_DEFAULT, validate_passes
 
@@ -96,6 +102,11 @@ class App(tk.Tk):
         self.control.grid(row=0, column=0, sticky="n")
         self.status.grid(row=1, column=0, sticky="n")
         self.live_map.grid(row=0, column=1, rowspan=2, sticky="nsew")
+
+        # Independent of the Calibrate/Scan hand-off -- see this class's
+        # own docstring and gui/adaptive_scan_panel.py's for why.
+        self.adaptive_scan = AdaptiveScanPanel(self.notebook, config)
+        self.notebook.add(self.adaptive_scan, text="Adaptive Scan")
 
         self.protocol("WM_DELETE_WINDOW", self.on_close)
         self.after(POLL_INTERVAL_MS, self.poll_queue)
@@ -212,8 +223,11 @@ class App(tk.Tk):
 
         # Release any hardware connection left open -- either a
         # calibration that never got handed off to a scan, or (if no scan
-        # ever consumed it) the one this App itself is holding.
+        # ever consumed it) the one this App itself is holding, or the
+        # Adaptive Scan tab's own independent connection (see that
+        # panel's docstring for why it's not part of this same hand-off).
         self.calibration.shutdown()
+        self.adaptive_scan.shutdown()
         if self.motion is not None:
             close = getattr(self.motion, "close", None)
             if callable(close):

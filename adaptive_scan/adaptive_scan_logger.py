@@ -306,6 +306,39 @@ def build_coarse_grid(readings: list, n_cells: int) -> dict:
     return {"n_side": n_side, "mean": mean_grid, "count": count_grid, "stddev": stddev_grid}
 
 
+def save_coarse_grid_csv(coarse_grid: dict, path: str) -> None:
+    """
+    Flatten a build_coarse_grid() result to a simple (cell_ix, cell_iy,
+    mean, count, stddev) CSV — the persisted form of the map (spec §10,
+    §12). Cells with count == 0 still get a row (mean/stddev written as
+    empty/NaN) so the file always has n_side*n_side rows regardless of
+    coverage, making it trivial to reshape back into a grid later without
+    having to reconstruct which cells were skipped.
+    """
+    n_side = coarse_grid["n_side"]
+    mean_grid = coarse_grid["mean"]
+    count_grid = coarse_grid["count"]
+    stddev_grid = coarse_grid["stddev"]
+
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["cell_ix", "cell_iy", "mean", "count", "stddev"])
+        for cx in range(n_side):
+            for cy in range(n_side):
+                mean_val = mean_grid[cx, cy]
+                stddev_val = stddev_grid[cx, cy]
+                writer.writerow([
+                    cx, cy,
+                    "" if np.isnan(mean_val) else mean_val,
+                    int(count_grid[cx, cy]),
+                    "" if np.isnan(stddev_val) else stddev_val,
+                ])
+
+
 if __name__ == "__main__":
     import tempfile
 
@@ -374,5 +407,13 @@ if __name__ == "__main__":
         print(f"Coarse grid OK: n_side={grid['n_side']}, "
               f"total binned={int(grid['count'].sum())}, "
               f"mean range={np.nanmin(grid['mean']):.1f}-{np.nanmax(grid['mean']):.1f}")
+
+        grid_csv_path = os.path.join(tmpdir, "coarse_grid.csv")
+        save_coarse_grid_csv(grid, grid_csv_path)
+        with open(grid_csv_path) as f:
+            grid_lines = f.readlines()
+        assert len(grid_lines) == 1 + 9, f"expected header + 9 cell rows, got {len(grid_lines)}"
+        assert grid_lines[0].strip() == "cell_ix,cell_iy,mean,count,stddev"
+        print(f"save_coarse_grid_csv OK ({len(grid_lines) - 1} cell rows + header)")
 
     print("adaptive_scan_logger smoke test OK")
