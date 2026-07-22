@@ -19,6 +19,8 @@ class IRReading:
     read_time: float                 # epoch seconds, wall clock at read
     stale: bool                      # True if value/timestamp can't be trusted
     error: Optional[str] = None
+    dilution: Optional[float] = None  # pyro signal dilution strength; None if
+                                       # no dilution tag configured (ir.pac.dilution_tag_name)
 
 
 class IRReader:
@@ -70,7 +72,15 @@ def get_ir_reader(config) -> "IRReader":
             controller_ip=ir_cfg["ip"],
             api_key_id=ir_cfg["api_key_id"],
             api_key_value=ir_cfg["api_key_value"],
-            variable_name=ir_cfg["tag_name"],
+            temp_tag_name=ir_cfg["temp_tag_name"],
+            # Defaults to the confirmed tag if the config predates this
+            # field — set ir.pac.emissivity_tag_name explicitly to override.
+            emissivity_tag_name=ir_cfg.get("emissivity_tag_name", "iai_PYRO_EMISSIVITY"),
+            # Optional — blank/absent until the real tag name is confirmed
+            # (see tools/list_pac_strategy_vars.py). Dilution is simply
+            # skipped (IRReading.dilution stays None) until this is set,
+            # rather than failing the whole IR read.
+            dilution_tag_name=ir_cfg.get("dilution_tag_name") or None,
         )
 
     if source not in (None, "mock"):

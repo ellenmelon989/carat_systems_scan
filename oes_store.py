@@ -11,6 +11,12 @@ HDF5 schema
   /wavelength_nm  (nλ,)              nm, initialized on first write
   /intensity      (nx, ny, npass, nλ) float32, NaN until written
   /ir_temp_c      (nx, ny, npass)    float32, NaN until written
+  /ir_emissivity  (nx, ny, npass)    float32, NaN until written (last-poll
+                                       value, not dwell-averaged — see
+                                       ScanManager._read_ir_with_retry)
+  /ir_dilution    (nx, ny, npass)    float32, NaN until written; stays all-NaN
+                                       until ir.pac.dilution_tag_name is set
+                                       (see tools/list_pac_strategy_vars.py)
   /timestamp      (nx, ny, npass)    float64, Unix epoch seconds
   /saturated      (nx, ny, npass)    bool
   /ir_error       (nx, ny, npass)    bool
@@ -122,6 +128,10 @@ class OESStore:
                              dtype="float32", fillvalue=np.nan)
             f.create_dataset("ir_temp_c", shape=(nx, ny, np_),
                              dtype="float32", fillvalue=np.nan)
+            f.create_dataset("ir_emissivity", shape=(nx, ny, np_),
+                             dtype="float32", fillvalue=np.nan)
+            f.create_dataset("ir_dilution", shape=(nx, ny, np_),
+                             dtype="float32", fillvalue=np.nan)
             f.create_dataset("timestamp", shape=(nx, ny, np_),
                              dtype="float64", fillvalue=np.nan)
             f.create_dataset("saturated", shape=(nx, ny, np_),
@@ -145,6 +155,8 @@ class OESStore:
         wavelengths: Optional[np.ndarray] = None,
         intensities: Optional[np.ndarray] = None,
         ir_temp_c: Optional[float] = None,
+        ir_emissivity: Optional[float] = None,
+        ir_dilution: Optional[float] = None,
         timestamp: Optional[float] = None,
         saturated: bool = False,
         ir_error: bool = False,
@@ -167,6 +179,12 @@ class OESStore:
         intensities : np.ndarray, optional
             Spectrum counts/a.u., same length as wavelengths.
         ir_temp_c : float, optional
+            Dwell-time-averaged ("filtered") pyrometer temperature.
+        ir_emissivity : float, optional
+            Last-poll pyrometer emissivity/strength (not dwell-averaged).
+        ir_dilution : float, optional
+            Last-poll pyro signal dilution. Stays NaN for every point until
+            ir.pac.dilution_tag_name is confirmed and set in config.yaml.
         timestamp : float, optional
             Unix epoch seconds. Defaults to now.
         saturated, ir_error, oes_error : bool
@@ -184,6 +202,10 @@ class OESStore:
                 f["intensity"][ix, iy, pass_id, :] = intensities.astype("float32")
             if ir_temp_c is not None:
                 f["ir_temp_c"][ix, iy, pass_id] = float(ir_temp_c)
+            if ir_emissivity is not None:
+                f["ir_emissivity"][ix, iy, pass_id] = float(ir_emissivity)
+            if ir_dilution is not None:
+                f["ir_dilution"][ix, iy, pass_id] = float(ir_dilution)
             f["timestamp"][ix, iy, pass_id] = timestamp if timestamp is not None else time.time()
             f["saturated"][ix, iy, pass_id] = saturated
             f["ir_error"][ix, iy, pass_id] = ir_error
@@ -200,12 +222,14 @@ class OESStore:
         Returns
         -------
         xr.Dataset with data variables:
-            intensity   (x_mm, y_mm, pass_id, wavelength_nm)
-            ir_temp_c   (x_mm, y_mm, pass_id)
-            timestamp   (x_mm, y_mm, pass_id)
-            saturated   (x_mm, y_mm, pass_id)
-            ir_error    (x_mm, y_mm, pass_id)
-            oes_error   (x_mm, y_mm, pass_id)
+            intensity     (x_mm, y_mm, pass_id, wavelength_nm)
+            ir_temp_c     (x_mm, y_mm, pass_id)
+            ir_emissivity (x_mm, y_mm, pass_id)
+            ir_dilution   (x_mm, y_mm, pass_id)
+            timestamp     (x_mm, y_mm, pass_id)
+            saturated     (x_mm, y_mm, pass_id)
+            ir_error      (x_mm, y_mm, pass_id)
+            oes_error     (x_mm, y_mm, pass_id)
 
         pass_id is size 1 for an ordinary single-pass scan — index/select
         it the same way regardless (e.g. `.isel(pass_id=-1)` for "latest
@@ -215,6 +239,17 @@ class OESStore:
         oscillation-detection input.
         """
         with h5py.File(path, "r") as f:
+            shape = f["ir_temp_c"].shape
+
+            def _optional(name):
+                # ir_emissivity/ir_dilution were added 2026-07-21 — older
+                # .h5 files written before that won't have these datasets.
+                # Fall back to all-NaN (same convention as "not yet
+                # written") instead of a KeyError so old scans still load.
+                if name in f:
+                    return f[name][:]
+                return np.full(shape, np.nan, dtype="float32")
+
             return xr.Dataset(
                 {
                     "intensity": (
@@ -222,6 +257,8 @@ class OESStore:
                         f["intensity"][:],
                     ),
                     "ir_temp_c": (["x_mm", "y_mm", "pass_id"], f["ir_temp_c"][:]),
+                    "ir_emissivity": (["x_mm", "y_mm", "pass_id"], _optional("ir_emissivity")),
+                    "ir_dilution": (["x_mm", "y_mm", "pass_id"], _optional("ir_dilution")),
                     "timestamp": (["x_mm", "y_mm", "pass_id"], f["timestamp"][:]),
                     "saturated": (["x_mm", "y_mm", "pass_id"], f["saturated"][:]),
                     "ir_error": (["x_mm", "y_mm", "pass_id"], f["ir_error"][:]),
@@ -273,6 +310,8 @@ if __name__ == "__main__":
                         wavelengths=wl,
                         intensities=spec,
                         ir_temp_c=900.0 + ix * 5 + iy + pass_id * 10,
+                        ir_emissivity=0.85 + 0.01 * ix,
+                        ir_dilution=1.0 + 0.02 * iy,
                         saturated=False,
                     )
 
@@ -280,10 +319,14 @@ if __name__ == "__main__":
         print(f"Dataset shape: {dict(ds.sizes)}")
         assert ds.sizes["pass_id"] == n_passes
         assert not np.isnan(ds.ir_temp_c.values).any(), "every (ix, iy, pass) should be written"
+        assert not np.isnan(ds.ir_emissivity.values).any(), "every (ix, iy, pass) should be written"
+        assert not np.isnan(ds.ir_dilution.values).any(), "every (ix, iy, pass) should be written"
         # Same XY point, later pass should be +10 (per the fake drift above)
         delta = float(ds.ir_temp_c.isel(pass_id=1).values[2, 2] - ds.ir_temp_c.isel(pass_id=0).values[2, 2])
         assert abs(delta - 10.0) < 1e-3, f"expected pass-to-pass delta of 10.0, got {delta}"
         print(f"IR range: {float(ds.ir_temp_c.min()):.1f} – {float(ds.ir_temp_c.max()):.1f} °C")
+        print(f"Emissivity range: {float(ds.ir_emissivity.min()):.3f} – {float(ds.ir_emissivity.max()):.3f}")
+        print(f"Dilution range: {float(ds.ir_dilution.min()):.3f} – {float(ds.ir_dilution.max()):.3f}")
         c2_map = ds.intensity.sel(wavelength_nm=516.0, method="nearest").isel(pass_id=-1)
         print(f"C2 Swan (516 nm) map mean (latest pass): {float(c2_map.mean()):.1f}")
         print("OK")

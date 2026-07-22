@@ -28,6 +28,7 @@ from scan_params import (
     in_radius,
     validate_dwell_time_s,
     validate_passes,
+    validate_points_within_limits,
 )
 
 
@@ -84,6 +85,73 @@ def generate_grid(scan_cfg):
     return points, xs, ys
 
 
+def compute_commanded_points(scan_cfg):
+    """
+    Build the COMPLETE list of (label, x_mm, y_mm) positions this scan
+    config will ever command the motion controller to move to: every
+    (already wafer-radius-masked) grid point from generate_grid(), PLUS
+    the periodic reference-point revisit position if scan.reference_point
+    is enabled (it's a real move issued during the scan, just not part
+    of the spatial grid/HDF5 array — see generate_grid()'s docstring).
+
+    Pure function over config — does not touch hardware, does not call
+    generate_grid()'s np.linspace/masking more than once, and runs in
+    well under a second even for a large grid. That's what makes it safe
+    to call as a pre-flight check (see preflight_check() below) before
+    connecting to a motion controller at all, and also what makes it a
+    useful fast-iteration tool on its own: verifying a config's commanded
+    positions doesn't require running an actual scan (minutes to hours,
+    real hardware) to find out a soft limit or calibration is wrong.
+    """
+    points, _, _ = generate_grid(scan_cfg)
+    commanded = [(f"grid point (ix={ix}, iy={iy})", x, y) for ix, iy, x, y in points]
+
+    ref_cfg = scan_cfg.get("reference_point", {})
+    if ref_cfg.get("enabled", False):
+        rx, ry = ref_cfg.get("position", (0.0, 0.0))
+        commanded.append(("reference point", float(rx), float(ry)))
+
+    return commanded
+
+
+def preflight_check(config):
+    """
+    Validate EVERY position this scan config will ever command the
+    motion controller to move to — the full raster grid plus the
+    reference-point revisit — against motion.soft_limits, all before any
+    hardware is touched. Raises ValueError (via
+    scan_params.validate_points_within_limits) listing every violating
+    point, not just the first, if anything is out of bounds.
+
+    Deliberately does NOT build a MotionController, IR reader, or
+    spectrometer connection: a bad config.yaml (wrong soft_limits after
+    a re-calibration, a raster that drifted past the mount's real
+    travel, a reference_point.position typo) should fail this check in
+    well under a second, not after connecting to hardware, homing
+    (which can take minutes at conservative home_velocity settings —
+    see config.yaml's home_timeout_s), or running partway into a scan.
+
+    Called from ScanManager.__init__ before anything else happens (see
+    there), and also runnable standalone via
+    `python scan_manager.py --check-only` for a zero-hardware, sub-
+    second sanity check of a config file.
+
+    NOTE on what this does and doesn't prove: this checks that the
+    *coordinates* generate_grid() produces fall inside the configured mm
+    box. It does NOT re-derive whether motion.soft_limits itself
+    correctly reflects the mount's real mechanical travel, and it does
+    NOT verify homing repeatability — both of those are calibration/
+    hardware properties, not something a pure-Python check over
+    config.yaml can confirm. See motion/real_newport_motion.py's HOMING
+    NOTE and resume() docstring for what home() actually guarantees.
+    """
+    scan_cfg = config["scan"]
+    commanded = compute_commanded_points(scan_cfg)
+    limits = config["motion"]["soft_limits"]
+    validate_points_within_limits(commanded, limits)
+    return commanded
+
+
 def extract_features(wavelengths, intensities, features_cfg, window_nm):
     """
     Extract intensity values for each named spectral feature by
@@ -115,10 +183,6 @@ class ScanManager:
         literally the same in-memory controller that was just homed.
         """
         self.config = config
-        self.motion = motion if motion is not None else get_motion_controller(config)
-        self.ir_reader = get_ir_reader(config)
-        self.spectrometer = get_spectrometer_reader(config)
-
         self.scan_cfg = config["scan"]
         self.oes_cfg = config["oes"]
         self.error_cfg = config["error_policy"]
@@ -134,6 +198,20 @@ class ScanManager:
         # this is the "revisit every point" path, distinct from (and in
         # addition to) the single fixed reference_point revisit below.
         self.passes = validate_passes(self.scan_cfg.get("passes", PASSES_DEFAULT))
+
+        # Pre-flight: validate the COMPLETE list of commanded positions
+        # (every grid point + the reference-point revisit) against
+        # motion.soft_limits BEFORE connecting to any hardware below —
+        # see preflight_check()'s docstring. Deliberately placed ahead of
+        # get_motion_controller()/get_ir_reader()/get_spectrometer_reader()
+        # so a bad config fails immediately, not after opening a hardware
+        # connection or (if a caller passed motion= already homed) after
+        # burning real homing time.
+        preflight_check(config)
+
+        self.motion = motion if motion is not None else get_motion_controller(config)
+        self.ir_reader = get_ir_reader(config)
+        self.spectrometer = get_spectrometer_reader(config)
 
         # Build OESStore from grid coords so it's ready before the scan starts.
         # Wavelength dimension is initialized lazily on first write_point().
@@ -337,7 +415,8 @@ class ScanManager:
             # taken from wherever the mirror actually ended up. Flag the
             # point and move on rather than measuring blind or aborting
             # the whole scan (see _move_with_retry).
-            ir_result = {"value": float("nan"), "error": True}
+            ir_result = {"value": float("nan"), "emissivity": float("nan"),
+                         "dilution": None, "error": True}
             oes_result = {"saturated": False, "error": True}
             wavelengths, intensities = None, None
 
@@ -458,15 +537,34 @@ class ScanManager:
         return False, last_error
 
     def _read_ir_with_retry(self):
+        """
+        value_c is dwell-time-averaged (read_averaged() polls for the full
+        dwell window and means the valid reads — this IS the "filtered"
+        temperature). emissivity and dilution are NOT averaged the same
+        way: read_averaged() only means value_c and hands back the LAST
+        poll's IRReading for everything else, so these two are last-value,
+        not dwell-averaged. That matches how the PAC side reports them
+        (an instantaneous strength/dilution reading, not an integrated one).
+
+        Previously this discarded the returned IRReading entirely
+        (`value, _ = ...`), which meant emissivity was read from the PAC
+        every poll and then thrown away — never reached build_point_record,
+        the CSV, or the HDF5 store. Fixed 2026-07-21.
+        """
         max_retries = self.error_cfg["max_retries"]
         for attempt in range(max_retries + 1):
             try:
-                value, _ = self.ir_reader.read_averaged(self.dwell_time_s)
-                return {"value": value, "error": False}
+                value, reading = self.ir_reader.read_averaged(self.dwell_time_s)
+                return {
+                    "value": value,
+                    "emissivity": reading.emissivity if reading is not None else float("nan"),
+                    "dilution": reading.dilution if reading is not None else None,
+                    "error": False,
+                }
             except Exception as e:
                 self.logger.log_event(f"IR read failed (attempt {attempt + 1}): {e}")
 
-        return {"value": float("nan"), "error": True}
+        return {"value": float("nan"), "emissivity": float("nan"), "dilution": None, "error": True}
 
     def _read_oes_with_retry(self):
         max_retries = self.error_cfg["max_retries"]
@@ -485,6 +583,8 @@ class ScanManager:
 
 if __name__ == "__main__":
     import argparse
+    import sys
+
     import yaml
 
     parser = argparse.ArgumentParser(
@@ -504,6 +604,20 @@ if __name__ == "__main__":
             "output dir. Does not modify config.yaml on disk. Without this "
             "flag, `python scan_manager.py` runs exactly what's in "
             "config.yaml — no silent overrides."
+        ),
+    )
+    parser.add_argument(
+        "--check-only", action="store_true",
+        help=(
+            "Validate every commanded grid + reference-point position "
+            "against motion.soft_limits and exit — 0 if all are in "
+            "bounds, 1 (with every violation listed) if not. Touches NO "
+            "hardware: no motion controller, IR reader, or spectrometer "
+            "connection is opened, and nothing is homed or moved. Fast "
+            "way to sanity-check a config after editing soft_limits, "
+            "step_size_mm, or re-running calibrate_scan_area.py, before "
+            "trusting it on real hardware. Combine with --smoke-test to "
+            "check the shrunk smoke-test grid instead of the real one."
         ),
     )
     args = parser.parse_args()
@@ -529,6 +643,17 @@ if __name__ == "__main__":
         config["scan"]["reference_point"]["enabled"] = True
         config["scan"]["reference_point"]["revisit_every_n_points"] = 4
         config["output"]["base_dir"] = "./scan_data_smoketest"
+
+    if args.check_only:
+        try:
+            commanded = preflight_check(config)
+        except ValueError as e:
+            print(f"FAIL: {e}")
+            sys.exit(1)
+        print(f"OK: all {len(commanded)} commanded position(s) "
+              "(grid + reference point) are within motion.soft_limits. "
+              "No hardware was touched.")
+        sys.exit(0)
 
     manager = ScanManager(config)
     manager.run()

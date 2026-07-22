@@ -1,0 +1,2 @@
+point_id,pass_id,x_mm,y_mm,timestamp,ir_temp_c,ir_emissivity,ir_dilution,ir_error,oes_saturated,oes_error,feature_CH,feature_C2_Swan,feature_H_alpha,feature_H_beta
+1,0,0.0,0.0,2026-07-21T21:13:46.873253,950.2,0.85,1.0,False,False,False,1500.0,800.0,2200.0,600.0

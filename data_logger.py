@@ -112,8 +112,9 @@ class DataLogger:
         the full spectrum into the HDF5 file.
 
         point_record: dict with keys such as
-            point_id, pass_id, x_mm, y_mm, ir_temp_c, ir_error,
-            oes_error, oes_saturated, feature_<name> values, timestamp
+            point_id, pass_id, x_mm, y_mm, ir_temp_c, ir_emissivity,
+            ir_dilution, ir_error, oes_error, oes_saturated,
+            feature_<name> values, timestamp
         ix, iy : int, optional
             Grid indices required when an OESStore is attached.
             Ignored (and not needed) for pure-CSV operation.
@@ -132,6 +133,8 @@ class DataLogger:
                 wavelengths=wavelengths,
                 intensities=intensities,
                 ir_temp_c=point_record.get("ir_temp_c"),
+                ir_emissivity=point_record.get("ir_emissivity"),
+                ir_dilution=point_record.get("ir_dilution"),
                 timestamp=time.time(),
                 saturated=bool(point_record.get("oes_saturated", False)),
                 ir_error=bool(point_record.get("ir_error", False)),
@@ -179,6 +182,14 @@ def build_point_record(point_id, x_mm, y_mm, ir_result, oes_result, feature_valu
         "y_mm": y_mm,
         "timestamp": datetime.now().isoformat(),
         "ir_temp_c": ir_result.get("value", float("nan")),
+        # Last-poll value, not dwell-averaged like ir_temp_c — see
+        # ScanManager._read_ir_with_retry()'s docstring.
+        "ir_emissivity": ir_result.get("emissivity", float("nan")),
+        # None until ir.pac.dilution_tag_name is confirmed and set in
+        # config.yaml (see tools/list_pac_strategy_vars.py) — written as
+        # NaN in that case so the CSV column stays numeric/consistent
+        # rather than mixing None and floats.
+        "ir_dilution": ir_result.get("dilution") if ir_result.get("dilution") is not None else float("nan"),
         "ir_error": ir_result.get("error", False),
         "oes_saturated": oes_result.get("saturated", False),
         "oes_error": oes_result.get("error", False),
@@ -214,7 +225,7 @@ if __name__ == "__main__":
         point_id=1,
         x_mm=0.0,
         y_mm=0.0,
-        ir_result={"value": 950.2, "error": False},
+        ir_result={"value": 950.2, "emissivity": 0.85, "dilution": 1.0, "error": False},
         oes_result={"saturated": False, "error": False},
         feature_values={"CH": 1500.0, "C2_Swan": 800.0, "H_alpha": 2200.0, "H_beta": 600.0},
     )

@@ -2,7 +2,10 @@
 map_plotter.py
 
 Creates 2D maps from a completed scan's summary CSV:
-- IR temperature map
+- IR temperature map (dwell-averaged/"filtered" — see ir_temp_c)
+- IR emissivity (signal strength) map
+- IR signal dilution map (blank/all-NaN until ir.pac.dilution_tag_name
+  is confirmed and set in config.yaml — see tools/list_pac_strategy_vars.py)
 - Total OES intensity map
 - Selected emission line maps (CH, C2 Swan, H-alpha, H-beta)
 - Spectral ratio maps
@@ -78,10 +81,30 @@ def generate_all_maps(config):
 
     df = load_scan_summary(summary_path)
 
-    # IR temperature map
+    # IR temperature map (dwell-averaged/"filtered")
     xs, ys, grid = grid_from_points(df, "ir_temp_c")
     plot_map(xs, ys, grid, "Substrate Temperature", os.path.join(maps_dir, "temperature_map.png"),
              cmap="inferno", label="Temperature (C)")
+
+    # IR emissivity (signal strength) map
+    if "ir_emissivity" in df.columns:
+        xs, ys, grid = grid_from_points(df, "ir_emissivity")
+        plot_map(xs, ys, grid, "Pyrometer Emissivity", os.path.join(maps_dir, "emissivity_map.png"),
+                 cmap="viridis", label="Emissivity")
+    else:
+        print("NOTE: skipping emissivity map — 'ir_emissivity' column not found "
+              "in scan_summary.csv (older scan, run before 2026-07-21).")
+
+    # IR signal dilution map — all-NaN (skipped) until ir.pac.dilution_tag_name
+    # is confirmed and filled into config.yaml; see tools/list_pac_strategy_vars.py.
+    if "ir_dilution" in df.columns and df["ir_dilution"].notna().any():
+        xs, ys, grid = grid_from_points(df, "ir_dilution")
+        plot_map(xs, ys, grid, "Pyrometer Signal Dilution", os.path.join(maps_dir, "dilution_map.png"),
+                 cmap="viridis", label="Dilution")
+    else:
+        print("NOTE: skipping dilution map — 'ir_dilution' is missing or all-NaN. "
+              "Set ir.pac.dilution_tag_name in config.yaml once the real REST tag "
+              "name is confirmed (tools/list_pac_strategy_vars.py can help find it).")
 
     # Feature maps
     feature_cols = [c for c in df.columns if c.startswith("feature_")]

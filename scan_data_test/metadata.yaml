@@ -1,0 +1,11 @@
+config:
+  metadata:
+    operator: test
+  output:
+    base_dir: ./scan_data_test
+    log_file: scan_log.txt
+    metadata_file: metadata.yaml
+    spectra_subdir: spectra
+    summary_csv: scan_summary.csv
+operator: test
+scan_started: '2026-07-21T21:13:46.762614'

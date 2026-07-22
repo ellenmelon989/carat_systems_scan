@@ -70,7 +70,19 @@ ir:
                         # decided 2026-07-11 that we only need REST for now)
   pac:
     ip: ""           # confirm on-site
-    tag_name: "iai_PYRO_TEMP"      # confirm via PAC Display Basic
+    temp_tag_name: "iai_PYRO_TEMP"             # confirmed
+    emissivity_tag_name: "iai_PYRO_EMISSIVITY" # confirmed
+    dilution_tag_name: ""    # pyro signal dilution strength — NOT confirmed yet
+                              # (2026-07-21). TrendWater[4]/PyroValues[6] are PAC
+                              # DISPLAY Float Table addresses, not REST strategy
+                              # variable names like iai_PYRO_TEMP — the actual
+                              # name has to be looked up separately. Run
+                              # tools/list_pac_strategy_vars.py against this IP,
+                              # or check PAC Control (Debug > Inspect) for
+                              # whatever feeds TrendWater[4]/PyroValues[6].
+                              # Left blank = dilution is skipped entirely
+                              # (IRReading.dilution stays None) until this is
+                              # filled in — nothing else needs to change.
     api_key_id: "carat_scanner"
     api_key_value: ""
   # averaging_time_s removed — superseded by scan.dwell_time_s (single operator-facing knob)

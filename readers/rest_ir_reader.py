@@ -42,14 +42,29 @@ except ImportError:
 
 class RestApiIRReader(IRReader):
     def __init__(self, controller_ip: str, api_key_id: str, api_key_value: str,
-                variable_name: str, use_https: bool = False, verify_ssl: bool = False,
-                timeout: float = 2.0):
+                temp_tag_name: str, emissivity_tag_name: str = "iai_PYRO_EMISSIVITY",
+                use_https: bool = False, verify_ssl: bool = False,
+                timeout: float = 2.0, dilution_tag_name: str = None):
+        """
+        temp_tag_name, emissivity_tag_name, dilution_tag_name are all REST
+        strategy variable names (config: ir.pac.temp_tag_name /
+        emissivity_tag_name / dilution_tag_name) — none are hardcoded here
+        anymore so a controller-side rename doesn't require a code change.
+        emissivity_tag_name defaults to the confirmed "iai_PYRO_EMISSIVITY"
+        so existing configs that predate this field keep working unchanged.
+        dilution_tag_name has no default — it's not yet confirmed (see
+        tools/list_pac_strategy_vars.py) — leaving it None/blank skips
+        dilution entirely (IRReading.dilution stays None) rather than
+        guessing a name.
+        """
         scheme = "https" if use_https else "http"
         base = f"{scheme}://{controller_ip}/api/v1/device/strategy/vars"
         self.url_floats  = f"{base}/floats"
         self.url_int32s  = f"{base}/int32s"
         self.auth        = (api_key_id, api_key_value)
-        self.variable_name = variable_name
+        self.temp_tag_name = temp_tag_name
+        self.emissivity_tag_name = emissivity_tag_name
+        self.dilution_tag_name = dilution_tag_name
         self.verify_ssl  = verify_ssl
         self.timeout     = timeout
         self.session     = requests.Session()
@@ -74,9 +89,11 @@ class RestApiIRReader(IRReader):
                 return IRReading(value_c=float("nan"), emissivity=float("nan"),
                                 pac_timestamp=None, read_time=read_time, stale=True,
                                 error="PyroTempInvalid flag set")
-            temp  = self._get_float(self.variable_name)      # iai_PYRO_TEMP
-            emis  = self._get_float("iai_PYRO_EMISSIVITY")
-            return IRReading(value_c=temp, emissivity=emis,
+            temp  = self._get_float(self.temp_tag_name)
+            emis  = self._get_float(self.emissivity_tag_name)
+            dilution = (self._get_float(self.dilution_tag_name)
+                        if self.dilution_tag_name else None)
+            return IRReading(value_c=temp, emissivity=emis, dilution=dilution,
                             pac_timestamp=read_time, read_time=read_time, stale=False)
         except requests.RequestException as e:
             return IRReading(value_c=float("nan"), emissivity=float("nan"),
@@ -92,6 +109,8 @@ if __name__ == "__main__":
         controller_ip=pac["ip"],
         api_key_id=pac["api_key_id"],
         api_key_value=pac["api_key_value"],
-        variable_name=pac["tag_name"],
+        temp_tag_name=pac["temp_tag_name"],
+        emissivity_tag_name=pac.get("emissivity_tag_name", "iai_PYRO_EMISSIVITY"),
+        dilution_tag_name=pac.get("dilution_tag_name") or None,
     )
     print(reader.read())
