@@ -588,7 +588,20 @@ class AdaptiveScanPanel(ttk.Frame):
         self._set_jog_enabled(True)
         self._start_position_poll()
 
-        status_word = "ABORTED" if aborted else "COMPLETE"
+        if aborted and getattr(result, "stop_reason", None) == "travel_limit_exceeded":
+            # Distinct from an operator-clicked Abort: the travel-limit
+            # safety guard (spec §9) tripped on its own. Same "aborted"
+            # queue message and same partial-results handling either way
+            # (see adaptive_scan.py's run()), but the operator should read
+            # this differently -- it means the scan went further than the
+            # max_x/y_travel_mm they configured, which usually means the
+            # wafer/geometry didn't match expectations or a stall/slip
+            # occurred, not that anyone asked for the scan to stop.
+            status_word = "STOPPED (travel-limit safety guard tripped)"
+        elif aborted:
+            status_word = "ABORTED"
+        else:
+            status_word = "COMPLETE"
         self._log(f"Scan {status_word} — {len(result.rows)} row(s), "
                   f"{len(result.readings)} reading(s) total.")
 

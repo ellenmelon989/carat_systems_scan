@@ -262,6 +262,25 @@ at essentially the same point `TravelGuard` would, but reported as a
 normal, expected scan-complete result rather than a `TravelLimitExceeded`
 safety fault.
 
+The fixed boundary searches in steps 2, 3, and 5 (the FIRST Y exit/entry,
+and the first row's X exit — all of which happen before any row exists,
+so step 13's "normal termination" framing doesn't apply to them) are
+bounded the same way, via `_max_y_search_iterations`/`_max_search_iterations`
+in `adaptive_scan.py`. Reaching that bound there raises `EdgeSearchFailed`
+(a distinct, descriptive exception naming which step failed and why —
+almost always a start-position or threshold/polarity mismatch, not a
+"scan complete" outcome), rather than looping until `TravelGuard`
+eventually trips somewhere far from the start position with no
+indication of which step caused it. `TravelLimitExceeded` itself is now
+caught inside `run()` (previously it was not): a genuine mid-scan safety
+trip returns whatever rows/readings/QC flags/coarse grid were already
+accumulated (each row is committed to the raw CSV as it finishes,
+regardless), with `AdaptiveScanResult.status="aborted"` and
+`stop_reason="travel_limit_exceeded"` — distinguishable from an operator-
+requested stop (`stop_reason="operator_abort"`) but handled identically
+by callers, since both preserve partial results rather than discarding
+them. Fixed 2026-07-22 after a code-review pass surfaced both gaps.
+
 ## 10. Data logging
 
 Per reading, retain: raw signal value(s) (temp/emissivity/dilution/OES
