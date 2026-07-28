@@ -12,13 +12,30 @@ Creates 2D maps from a completed scan's summary CSV:
 
 Reads scan_summary.csv (written by data_logger.py) and produces
 PNG maps via matplotlib.
+
+Uses matplotlib's Figure/FigureCanvasAgg directly rather than pyplot --
+same reasoning as gui/live_map.py's own module docstring: pyplot carries
+global figure-manager state and, depending on what's already imported in
+the process, may pick an interactive GUI backend. That was harmless while
+this module only ever ran standalone (`python scan/map_plotter.py`, its
+own process) -- it stopped being harmless once scan_manager.py started
+calling generate_all_maps() automatically from ScanManager._generate_maps()
+at the end of a GUI-driven scan, which runs on gui/scan_worker.py's
+background worker THREAD, not the Tk mainloop thread. Tkinter (and any
+interactive matplotlib backend built on it) is not thread-safe to touch
+from a non-main thread, which is exactly the rule gui/scan_worker.py's own
+module docstring is careful about elsewhere ("This module never touches a
+tkinter object"). Figure + FigureCanvasAgg is the pure offscreen-rendering
+path -- no GUI toolkit involved at all -- so it's safe to call from any
+thread regardless of what the rest of the process is doing with Tk.
 """
 
 import os
 
 import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 
 
 def load_scan_summary(summary_csv_path):
@@ -51,7 +68,12 @@ def grid_from_points(df, value_col):
 
 
 def plot_map(xs, ys, grid, title, output_path, cmap="viridis", label=None):
-    fig, ax = plt.subplots(figsize=(6, 5))
+    # Figure(...) + FigureCanvasAgg(fig) (not plt.subplots()) -- see this
+    # module's docstring for why: pure offscreen rendering, no pyplot
+    # global state, safe to call from any thread.
+    fig = Figure(figsize=(6, 5))
+    FigureCanvasAgg(fig)
+    ax = fig.add_subplot(111)
     im = ax.imshow(
         grid,
         extent=[xs.min(), xs.max(), ys.min(), ys.max()],
@@ -68,7 +90,6 @@ def plot_map(xs, ys, grid, title, output_path, cmap="viridis", label=None):
 
     fig.tight_layout()
     fig.savefig(output_path, dpi=150)
-    plt.close(fig)
     print(f"Saved {output_path}")
 
 

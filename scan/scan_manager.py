@@ -455,7 +455,57 @@ class ScanManager:
         self.logger.log_event(f"Scan complete ({self.passes} pass"
                                f"{'es' if self.passes != 1 else ''}, "
                                f"{point_id} total points written)")
+        self._generate_maps()
         return "completed"
+
+    def _generate_maps(self):
+        """
+        Auto-generate and save the PNG summary maps (temperature,
+        emissivity, dilution, OES feature/ratio maps -- see
+        scan.map_plotter.generate_all_maps) into <output.base_dir>/maps/
+        right after a completed scan, instead of requiring a separate
+        manual `python scan/map_plotter.py` run afterward. Lives here
+        (called from run(), not either caller) so both the GUI
+        (gui/scan_worker.py's run_scan -> ScanManager.run()) and the
+        standalone CLI (`python scan/scan_manager.py`) get this for free.
+
+        Only called from the "completed" path, deliberately -- an
+        aborted or axis-fault-stopped scan's partial data is still real
+        (see DataLogger's per-point crash safety), but "regenerate maps
+        automatically" was asked for completed scans specifically; a
+        partial scan's maps can still be produced by hand afterward via
+        `python scan/map_plotter.py` (or by calling this same
+        scan.map_plotter.generate_all_maps against config.yaml), same as
+        before this method existed.
+
+        Best-effort: a plotting failure (matplotlib/backend issue, an
+        empty or unexpectedly-shaped summary CSV, etc.) is logged and
+        swallowed rather than re-raised. A scan that finished
+        successfully must not be reported as failed just because the
+        downstream PNG rendering had a problem -- scan_summary.csv and
+        the HDF5 store are already safely on disk either way, and
+        scan/map_plotter.py can always be re-run by hand afterward.
+
+        Lazy import (not a module-level import in this file): matplotlib
+        + pandas are real dependencies of map_plotter.py, but pulling
+        them in at import time for every ScanManager use (including
+        preflight-only `--check-only` runs that touch no hardware and
+        produce no data) is unnecessary weight this defers until a scan
+        has actually completed.
+        """
+        try:
+            from scan.map_plotter import generate_all_maps
+            generate_all_maps(self.config)
+        except Exception as exc:
+            self.logger.log_event(
+                f"WARNING: automatic map generation failed (scan data itself is "
+                f"unaffected -- re-run `python scan/map_plotter.py` by hand once "
+                f"fixed): {exc}"
+            )
+            return
+
+        maps_dir = _os.path.join(self.config["output"]["base_dir"], "maps")
+        self.logger.log_event(f"Maps generated and saved to {maps_dir}")
 
     def _measure_point(self, point_id, ix, iy, x, y, pass_id=0, is_reference=False, on_point=None):
         limits = self.config["motion"]["soft_limits"]

@@ -36,6 +36,11 @@ motion:
   usb_index: 0              # only used when interface: usb
   steps_per_mm_x: 500       # fill in after calibration
   steps_per_mm_y: 500       # fill in after calibration
+  invert_x: false           # set true if jogging +X/+Y ever visibly moves the mirror the
+  invert_y: false           # OPPOSITE direction on-site -- a wiring/mounting fact, found by
+                             # jogging and watching, not something to guess in advance. See
+                             # motion/real_newport_motion.py's module docstring for why this
+                             # is separate from steps_per_mm_x/y's own (always-positive) sign.
   # Calibration must be run at move_velocity below (open-loop step size is
   # velocity-dependent) — re-run calibration if move_velocity changes.
   calibration_date: null           # fill in: date steps_per_mm was measured

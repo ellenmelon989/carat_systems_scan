@@ -50,6 +50,15 @@ Config keys (under motion:)
   axis_y: 2                 # 8742 axis number for Y mirror axis
   steps_per_mm_x: 500       # CALIBRATE ON-SITE (see above)
   steps_per_mm_y: 500       # CALIBRATE ON-SITE (see above)
+  invert_x: false           # true if a positive commanded x_mm needs to drive axis_x
+  invert_y: false           # in the mount's physically negative direction (e.g. jog Up
+                             # visibly moves the mirror down) -- a wiring/mounting-orientation
+                             # fact, found by jogging and observing which way is which.
+                             # Kept separate from steps_per_mm_x/y's own sign on purpose:
+                             # calibrate_steps_per_mm() (scan/calibrate_scan_area.py) always
+                             # computes and writes a POSITIVE steps_per_mm, so encoding
+                             # direction as a negative steps_per_mm would get silently
+                             # un-flipped by the next on-site steps_per_mm recalibration.
   hard_home: true           # true = drive to hard stop; false = zero-in-place
   home_steps: 100000        # steps to drive toward hard stop during homing
   home_velocity: 200        # steps/s during homing (slow to avoid crash)
@@ -149,6 +158,28 @@ class NewportPicomotorController(MotionController):
         self._steps_per_mm_y = float(
             motion_cfg.get("steps_per_mm_y", _DEFAULT_STEPS_PER_MM)
         )
+
+        # invert_x/invert_y: hardware wiring/orientation fact -- "does a
+        # positive commanded mm move this axis in the direction the
+        # operator calls positive (jog Up = +Y, jog Right = +X), or the
+        # opposite?" This is deliberately a SEPARATE flag from
+        # steps_per_mm_x/y's own sign, not encoded as a negative
+        # steps_per_mm value, because calibrate_steps_per_mm() in
+        # scan/calibrate_scan_area.py always computes and writes a
+        # POSITIVE steps_per_mm (steps_left_right / true_x_mm, both
+        # magnitudes) -- any future on-site steps_per_mm recalibration
+        # would silently flip a negative steps_per_mm back to positive
+        # and undo the direction fix with no indication why the mount
+        # started jogging backwards again. Keeping direction here instead
+        # means it survives every future steps_per_mm recalibration.
+        # self._eff_steps_per_mm_x/y (below) is what move_to()/
+        # get_position() actually use for mm<->step conversion --
+        # self._steps_per_mm_x/y itself stays the plain, always-positive,
+        # on-site-calibrated magnitude, untouched by this.
+        self._invert_x = bool(motion_cfg.get("invert_x", False))
+        self._invert_y = bool(motion_cfg.get("invert_y", False))
+        self._eff_steps_per_mm_x = self._steps_per_mm_x * (-1.0 if self._invert_x else 1.0)
+        self._eff_steps_per_mm_y = self._steps_per_mm_y * (-1.0 if self._invert_y else 1.0)
 
         self._hard_home = bool(motion_cfg.get("hard_home", _DEFAULT_HARD_HOME))
         self._home_steps = int(motion_cfg.get("home_steps", _DEFAULT_HOME_STEPS))
@@ -346,15 +377,16 @@ class NewportPicomotorController(MotionController):
         """
         Absolute move to (x_mm, y_mm) in scan-grid coordinates.
 
-        Converts mm → steps using steps_per_mm_x / _y, offsets by the
-        homed origin, and issues both axis moves simultaneously.
-        Returns immediately; call wait_for_settle() to block.
+        Converts mm → steps using steps_per_mm_x / _y (and invert_x/
+        invert_y -- see __init__), offsets by the homed origin, and
+        issues both axis moves simultaneously. Returns immediately; call
+        wait_for_settle() to block.
         """
         if not self._homed:
             raise RuntimeError("Must call home() before move_to().")
 
-        target_x = self._origin_x + round(x_mm * self._steps_per_mm_x)
-        target_y = self._origin_y + round(y_mm * self._steps_per_mm_y)
+        target_x = self._origin_x + round(x_mm * self._eff_steps_per_mm_x)
+        target_y = self._origin_y + round(y_mm * self._eff_steps_per_mm_y)
 
         logger.debug(
             "move_to(%.4f mm, %.4f mm) → steps (%d, %d)",
@@ -374,7 +406,7 @@ class NewportPicomotorController(MotionController):
         try:
             sx = self._stage.get_position(axis=self._axis_x) - self._origin_x
             sy = self._stage.get_position(axis=self._axis_y) - self._origin_y
-            return (sx / self._steps_per_mm_x, sy / self._steps_per_mm_y)
+            return (sx / self._eff_steps_per_mm_x, sy / self._eff_steps_per_mm_y)
         except Exception as exc:
             logger.warning("get_position() failed: %s", exc)
             return (0.0, 0.0)
