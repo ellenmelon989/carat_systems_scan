@@ -34,6 +34,8 @@ if _REPO_ROOT not in _sys.path:
     _sys.path.insert(0, _REPO_ROOT)
 # ---------------------------------------------------------------------------
 
+import logging
+
 import numpy as np
 
 from motion.motion_controller import get_motion_controller, AxisStateUnknown
@@ -49,6 +51,8 @@ from scan.scan_params import (
     validate_passes,
     validate_points_within_limits,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def generate_grid(scan_cfg):
@@ -228,9 +232,43 @@ class ScanManager:
         # burning real homing time.
         preflight_check(config)
 
+        # _owns_motion tracks whether THIS __init__ opened the connection
+        # (motion=None -> get_motion_controller() below) vs. received an
+        # already-connected one from a caller (e.g. the Calibrate tab
+        # hand-off in gui/app.py). Only a connection we opened ourselves
+        # gets closed on the error path right below -- closing a
+        # caller-owned, handed-off motion object here would pull the rug
+        # out from under that caller's own cleanup expectations.
+        self._owns_motion = motion is None
         self.motion = motion if motion is not None else get_motion_controller(config)
-        self.ir_reader = get_ir_reader(config)
-        self.spectrometer = get_spectrometer_reader(config)
+        try:
+            self.ir_reader = get_ir_reader(config)
+            self.spectrometer = get_spectrometer_reader(config)
+        except Exception:
+            # Without this, a config error here (e.g. a missing
+            # ir.pac.temp_tag_name key) leaves the just-opened 8742/motion
+            # connection dangling: ScanManager.__init__ raises, run_scan()
+            # reports "Failed to initialize scan hardware" and returns, but
+            # nothing ever calls self.motion.close(). The controller object
+            # is only released whenever Python happens to garbage-collect
+            # it, and if the hardware only allows one live connection (true
+            # of the 8742 over USB/Ethernet), every later connection
+            # attempt -- including an independent one from the Adaptive
+            # Scan tab -- fails until then, usually surfacing as a
+            # confusing secondary "Error closing 8742 connection: ...
+            # object has no attribute '_stage'" instead of pointing at the
+            # real cause. Close what we opened, then let the original
+            # exception propagate unchanged.
+            if self._owns_motion:
+                try:
+                    self.motion.close()
+                except Exception as close_exc:
+                    logger.warning(
+                        "Also failed to close the motion connection while "
+                        "cleaning up after a failed ScanManager init: %s",
+                        close_exc,
+                    )
+            raise
 
         # Build OESStore from grid coords so it's ready before the scan starts.
         # Wavelength dimension is initialized lazily on first write_point().

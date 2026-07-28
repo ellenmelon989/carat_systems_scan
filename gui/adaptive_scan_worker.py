@@ -37,9 +37,18 @@ def run_adaptive_scan(config, params, motion, ir_reader, spectrometer, output_pa
     wherever the operator just jogged to, per spec §3 step 1).
 
     Puts one of the following onto q as the scan progresses:
-      ("row", {"row_summary": RowSummary, "n_readings": int})
+      ("row", {"row_summary": RowSummary, "n_readings": int, "readings": list[dict]})
                             -- once per completed row, forwarded from
                                AdaptiveRasterScanner's on_row callback.
+                               `readings` is that row's own finished
+                               reading dicts (each already carries
+                               row_number/normalized_x -- see
+                               AdaptiveScanRawLogger.finish_row()), passed
+                               through so the GUI can accumulate them
+                               across rows and re-bin a live coarse grid
+                               after every row (Roy's 2026-07-27 ask) —
+                               plain dicts, not tkinter/hardware objects,
+                               so they're safe to carry across the queue.
       ("done", AdaptiveScanResult)   -- scan finished (status=="completed").
       ("aborted", AdaptiveScanResult) -- stop_event was set; scan stopped
                                early. Still carries whatever rows/readings
@@ -67,7 +76,7 @@ def run_adaptive_scan(config, params, motion, ir_reader, spectrometer, output_pa
     try:
         result = scanner.run(
             on_row=lambda row_summary, readings: q.put(
-                ("row", {"row_summary": row_summary, "n_readings": len(readings)})
+                ("row", {"row_summary": row_summary, "n_readings": len(readings), "readings": readings})
             ),
             stop_event=stop_event,
         )

@@ -27,8 +27,12 @@ connect-then-jog pattern:
      tkinter object, and only from callbacks Tk itself invokes on the
      mainloop thread (poll loop, button commands) -- same rule
      gui/app.py's own docstring states for the whole GUI.
-  5. On completion (or abort), the coarse grid is rendered as a heatmap
-     and saved to <output dir>/coarse_grid.csv alongside the raw
+  5. The coarse grid heatmap updates LIVE after every completed row (all
+     readings accumulated so far are re-binned via
+     adaptive_scan_logger.build_coarse_grid() -- see _handle_message's
+     "row" branch), not just once at the end. On completion (or abort),
+     the same heatmap is re-rendered from the final, authoritative
+     result and saved to <output dir>/coarse_grid.csv alongside the raw
      per-reading CSV adaptive_scan.py itself already writes incrementally.
 
 Independent hardware connection, deliberately: unlike Calibrate -> Scan
@@ -48,6 +52,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from tkinter.scrolledtext import ScrolledText
 
+import numpy as np
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
@@ -56,7 +61,7 @@ from readers.ir_reader_base import get_ir_reader
 from readers.spectrometer_reader_base import get_spectrometer_reader
 
 from adaptive_scan.adaptive_scan import AdaptiveScanParams
-from adaptive_scan.adaptive_scan_logger import save_coarse_grid_csv
+from adaptive_scan.adaptive_scan_logger import build_coarse_grid, save_coarse_grid_csv
 from adaptive_scan.adaptive_scan_signal import read_raw_signals
 from adaptive_scan.adaptive_scan_params import (
     available_signal_names, READING_INTERVAL_MODES, COARSE_GRID_CELLS_DEFAULT,
@@ -114,6 +119,15 @@ class AdaptiveScanPanel(ttk.Frame):
         self.worker = None
         self._current_outdir = None
         self._cbar = None
+
+        # Real values assigned by _reset_results()/_handle_start() at the
+        # start of each run -- defaulted here too so toggling the "show
+        # read counts" checkbox before any scan has ever run doesn't hit
+        # an AttributeError in _redraw_current().
+        self._all_readings = []
+        self._last_coarse_grid = None
+        self._last_live = False
+        self._coarse_grid_cells = None
 
         self._build_scroll_container()
 
@@ -317,7 +331,7 @@ class AdaptiveScanPanel(ttk.Frame):
         self.log.grid(row=3, column=0, sticky="nsew")
 
     def _build_results(self):
-        ttk.Label(self.content, text="Coarse map (after scan completes)").grid(
+        ttk.Label(self.content, text="Coarse map (updates after each row)").grid(
             row=2, column=1, sticky="w", pady=(8, 0))
         self.figure = Figure(figsize=(3.8, 3.8), dpi=100)
         self.ax = self.figure.add_subplot(111)
@@ -325,6 +339,17 @@ class AdaptiveScanPanel(ttk.Frame):
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.content)
         self.canvas.get_tk_widget().grid(row=3, column=1, sticky="nsew")
         self.canvas.draw_idle()
+
+        # Mirrors gui/live_map.py's count-toggle -- lets the operator flip
+        # between "average value per cell" and "how many reads landed in
+        # each cell" for the same surprise-monitoring reason (Roy's
+        # 2026-07-27 ask). Redraws whatever coarse grid was last computed
+        # (live, mid-scan, or the final result) rather than re-fetching.
+        self.show_counts_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            self.content, text="Show read counts per cell (instead of mean)",
+            variable=self.show_counts_var, command=self._redraw_current,
+        ).grid(row=4, column=1, sticky="w", pady=(4, 0))
 
     # ------------------------------------------------------------------
     # Logging
@@ -346,6 +371,26 @@ class AdaptiveScanPanel(ttk.Frame):
             self.ir_reader = get_ir_reader(self.config)
             self.spectrometer = get_spectrometer_reader(self.config)
         except Exception as exc:
+            # If motion connected but ir_reader/spectrometer construction
+            # failed right after (e.g. a config error), self.motion is
+            # already a live, open connection -- close it here rather than
+            # leaving it dangling. Otherwise the operator sees "Connection
+            # failed" and assumes nothing is connected, tries Connect
+            # again, and that second attempt fails against the still-open
+            # first connection (same 8742 leak this panel's docstring
+            # warns is possible if two tabs touch the mount at once) --
+            # surfacing as an unrelated "no attribute '_stage'" error on
+            # cleanup instead of the real cause.
+            if self.motion is not None:
+                close = getattr(self.motion, "close", None)
+                if callable(close):
+                    try:
+                        close()
+                    except Exception:
+                        pass
+                self.motion = None
+            self.ir_reader = None
+            self.spectrometer = None
             messagebox.showerror("Connection failed", str(exc))
             return
 
@@ -499,6 +544,12 @@ class AdaptiveScanPanel(ttk.Frame):
             messagebox.showerror("Invalid parameters", str(exc))
             return
 
+        # Needed by _handle_message's "row" branch to re-bin the live
+        # coarse grid with the SAME cell count the operator configured for
+        # the final result -- stashed here rather than threaded through
+        # the queue on every row message.
+        self._coarse_grid_cells = params.coarse_grid_cells
+
         outdir = self.outdir_var.get().strip() or "./adaptive_scan_data"
         self._current_outdir = outdir
         output_path = os.path.join(outdir, "raw_readings.csv")
@@ -547,6 +598,16 @@ class AdaptiveScanPanel(ttk.Frame):
             self._cbar = None
         self.canvas.draw_idle()
 
+        # Accumulated across rows so the coarse grid can be re-binned live
+        # after every completed row (see _handle_message's "row" branch),
+        # not just once at the end. build_coarse_grid() re-derives
+        # normalized_y from row rank each time it's called (see that
+        # function's docstring) -- cheap enough to just recompute over
+        # everything so far rather than trying to update it incrementally.
+        self._all_readings = []
+        self._last_coarse_grid = None
+        self._last_live = False
+
     # ------------------------------------------------------------------
     # Queue draining (Tk mainloop thread only, per module docstring)
     # ------------------------------------------------------------------
@@ -572,6 +633,24 @@ class AdaptiveScanPanel(ttk.Frame):
                 f"Row {row_summary.row_number} ({row_summary.scan_direction}): "
                 f"{payload['n_readings']} readings"
             )
+
+            # Live map update (Roy's 2026-07-27 ask): re-bin everything
+            # collected so far -- including this row -- and redraw, rather
+            # than waiting for the whole scan to finish. normalized_x is
+            # fixed per reading once its own row ends, but normalized_y
+            # depends on total row count, which isn't known until the scan
+            # itself terminates (see build_coarse_grid's docstring) -- so
+            # earlier rows' Y positions can shift slightly as later rows
+            # arrive. That's expected and acceptable for this in-progress
+            # preview; the final render in _on_finished uses the same
+            # function over the complete result, so it always ends up
+            # correct once the scan is done.
+            self._all_readings.extend(payload.get("readings", []))
+            if self._all_readings:
+                coarse_grid = build_coarse_grid(self._all_readings, self._coarse_grid_cells)
+                self._last_coarse_grid = coarse_grid
+                self._last_live = True
+                self._render_heatmap(coarse_grid, live=True)
         elif kind == "done":
             self._on_finished(payload, aborted=False)
         elif kind == "aborted":
@@ -614,7 +693,9 @@ class AdaptiveScanPanel(ttk.Frame):
             self._log("No rows flagged.")
 
         if result.coarse_grid.get("mean") is not None:
-            self._render_heatmap(result.coarse_grid)
+            self._last_coarse_grid = result.coarse_grid
+            self._last_live = False
+            self._render_heatmap(result.coarse_grid, live=False)
             try:
                 grid_path = os.path.join(self._current_outdir, "coarse_grid.csv")
                 save_coarse_grid_csv(result.coarse_grid, grid_path)
@@ -624,22 +705,46 @@ class AdaptiveScanPanel(ttk.Frame):
         else:
             self._log("No readings collected — nothing to grid.")
 
-    def _render_heatmap(self, coarse_grid):
+    def _redraw_current(self):
         """
-        mean_grid is indexed [cell_ix, cell_iy] (see build_coarse_grid) --
-        transposed here so imshow's (row, col) convention lines up with
-        (y, x), matching gui/live_map.py's own orientation for the
-        precision path's live map.
+        Checkbox command for show_counts_var -- re-render whatever coarse
+        grid was last computed (live, mid-scan, or the final result)
+        rather than waiting for the next row/scan-end message.
         """
-        mean_grid = coarse_grid["mean"]
+        if self._last_coarse_grid is not None:
+            self._render_heatmap(self._last_coarse_grid, live=self._last_live)
+
+    def _render_heatmap(self, coarse_grid, live=False):
+        """
+        mean_grid/count_grid are indexed [cell_ix, cell_iy] (see
+        build_coarse_grid) -- transposed here so imshow's (row, col)
+        convention lines up with (y, x), matching gui/live_map.py's own
+        orientation for the precision path's live map.
+
+        live=True means this coarse_grid was built from readings
+        accumulated so far, mid-scan (see _handle_message's "row"
+        branch) -- its Y-axis row ranks can still shift as more rows
+        arrive (see that branch's comment). live=False means this is
+        the scan's final, authoritative result.
+        """
+        if self.show_counts_var.get():
+            grid = coarse_grid["count"].astype(float)
+            grid = np.where(grid == 0, np.nan, grid)
+            cbar_label = "reads"
+        else:
+            grid = coarse_grid["mean"]
+            cbar_label = "value"
+
         self.ax.clear()
-        im = self.ax.imshow(mean_grid.T, origin="lower", cmap="inferno", aspect="equal")
+        im = self.ax.imshow(grid.T, origin="lower", cmap="inferno", aspect="equal")
         self.ax.set_xlabel("normalized X (row-relative)")
-        self.ax.set_ylabel("normalized Y (row rank)")
-        self.ax.set_title(f"Coarse map ({coarse_grid['n_side']}x{coarse_grid['n_side']} cells)")
+        self.ax.set_ylabel("normalized Y (row rank" + (", so far)" if live else ")"))
+        status = "live, in progress" if live else "final"
+        self.ax.set_title(f"Coarse map ({coarse_grid['n_side']}x{coarse_grid['n_side']} cells, {status})")
         if self._cbar is not None:
             self._cbar.remove()
         self._cbar = self.figure.colorbar(im, ax=self.ax)
+        self._cbar.set_label(cbar_label)
         self.canvas.draw_idle()
 
     # ------------------------------------------------------------------

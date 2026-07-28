@@ -68,11 +68,32 @@ def get_ir_reader(config) -> "IRReader":
     if source == "pac":
         from .rest_ir_reader import RestApiIRReader
         ir_cfg = config["ir"]["pac"]
+
+        # Fail with a clear pointer at the missing config key rather than
+        # a bare KeyError('temp_tag_name') -- that message alone doesn't
+        # say WHERE to fix it, and shows up unhelpfully as "Failed to
+        # initialize scan hardware: 'temp_tag_name'" in the GUI's error
+        # dialog. ip/api_key_id/api_key_value are left as plain [] lookups
+        # since those are always operator-filled during setup and their
+        # KeyErrors are self-explanatory by name; temp_tag_name is the one
+        # that's easy to leave blank/typo'd (empty string is also
+        # rejected -- an empty tag name would silently 404 every read).
+        temp_tag_name = ir_cfg.get("temp_tag_name")
+        if not temp_tag_name:
+            raise ValueError(
+                "ir.pac.temp_tag_name is missing or blank in config.yaml. "
+                "This must be the REST strategy variable name that holds "
+                "the converted IR temperature (confirmed value in this "
+                "project: 'iai_PYRO_TEMP'). See readers/rest_ir_reader.py's "
+                "module docstring for how to find it in PAC Control if it's "
+                "changed."
+            )
+
         return RestApiIRReader(
             controller_ip=ir_cfg["ip"],
             api_key_id=ir_cfg["api_key_id"],
             api_key_value=ir_cfg["api_key_value"],
-            temp_tag_name=ir_cfg["temp_tag_name"],
+            temp_tag_name=temp_tag_name,
             # Defaults to the confirmed tag if the config predates this
             # field — set ir.pac.emissivity_tag_name explicitly to override.
             emissivity_tag_name=ir_cfg.get("emissivity_tag_name", "iai_PYRO_EMISSIVITY"),

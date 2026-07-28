@@ -190,6 +190,19 @@ class NewportPicomotorController(MotionController):
             interface, conn_desc, self._axis_x, self._axis_y,
         )
 
+        # Set BEFORE the connect attempt so close()/__del__ always have a
+        # real attribute to check, even if the connect below raises. Without
+        # this, a failed connect (device unreachable, or already claimed by
+        # another live connection -- e.g. a previous ScanManager init that
+        # errored out after opening this same connection and never closed
+        # it) leaves self._stage unset. This half-constructed object then
+        # gets __del__'d by the garbage collector, close() runs, and
+        # `self._stage.close()` raises its own AttributeError ("no
+        # attribute '_stage'") that gets logged as a confusing secondary
+        # warning -- masking the real "Failed to connect to Newport 8742"
+        # error that's the actual thing worth investigating.
+        self._stage = None
+
         try:
             self._stage = Newport.Picomotor8742(conn=conn)
         except Exception as exc:
@@ -381,11 +394,19 @@ class NewportPicomotorController(MotionController):
     # ------------------------------------------------------------------
 
     def close(self):
+        if self._stage is None:
+            # Never connected (constructor raised before assignment) or
+            # already closed -- nothing to do. Avoids the misleading
+            # "no attribute '_stage'" secondary error on cleanup after a
+            # failed connect (see the comment above where _stage is set).
+            return
         try:
             self._stage.close()
             logger.info("8742 connection closed.")
         except Exception as exc:
             logger.warning("Error closing 8742 connection: %s", exc)
+        finally:
+            self._stage = None
 
     def __enter__(self):
         return self
