@@ -81,6 +81,25 @@ def generate_all_maps(config):
 
     df = load_scan_summary(summary_path)
 
+    # grid_from_points() below keys each cell by (x_mm, y_mm) alone and
+    # just overwrites on collision -- for a scan.passes > 1 run (see
+    # scan_manager.py/oes_store.py's pass_id axis), the CSV has one row
+    # per (x, y, pass), so every map this function produces silently ends
+    # up showing only the LAST pass's snapshot, with no per-pass output
+    # and no indication that earlier passes were dropped. Made loud here
+    # rather than fixed (which pass to show, or averaged/per-pass PNGs, is
+    # a product decision) -- matches this file's existing "make a skip
+    # loud" convention (see the ratio-map / dilution-map skip notes below).
+    if "pass_id" in df.columns and df["pass_id"].nunique() > 1:
+        print(
+            f"NOTE: this scan has {df['pass_id'].nunique()} passes (scan.passes > 1), "
+            "but every map below only shows the LAST pass at each point — "
+            "grid_from_points() has no per-pass handling. For full multi-pass "
+            "data (per-point time series across passes, e.g. oscillation "
+            "tracking), load the HDF5 store instead: "
+            "scan.oes_store.OESStore.load(<output.oes_hdf5 path>)."
+        )
+
     # IR temperature map (dwell-averaged/"filtered")
     xs, ys, grid = grid_from_points(df, "ir_temp_c")
     plot_map(xs, ys, grid, "Substrate Temperature", os.path.join(maps_dir, "temperature_map.png"),
@@ -149,7 +168,9 @@ def generate_all_maps(config):
 if __name__ == "__main__":
     import yaml
 
-    with open("config.yaml") as f:
+    # utf-8-sig: see run_gui.py's copy of this comment -- tolerates/strips a
+    # UTF-8 BOM (e.g. from editing config.yaml in Notepad on Windows).
+    with open("config.yaml", encoding="utf-8-sig") as f:
         config = yaml.safe_load(f)
 
     generate_all_maps(config)

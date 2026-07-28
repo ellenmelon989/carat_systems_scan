@@ -95,6 +95,22 @@ class AdaptiveScanRawLogger:
         if parent:
             os.makedirs(parent, exist_ok=True)
         self._header_written = os.path.exists(path)
+        if self._header_written:
+            # Loud, not silent: same reused-output-directory gap as
+            # scan/data_logger.py's DataLogger (see its own warning) --
+            # finish_row() below appends to this file, so a pre-existing
+            # raw_readings.csv from an earlier adaptive scan silently gets
+            # a second scan's rows appended under it, reading_id restarting
+            # from 0 and row numbering overlapping the old file's. Default
+            # output dir here is operator-typed per run (see
+            # gui/adaptive_scan_panel.py's Output directory field), so this
+            # is easy to hit by reusing the same folder across two runs.
+            print(
+                f"WARNING: {self.path} already exists — new readings will be "
+                "APPENDED to it (reading_id restarts from 0), not written to a "
+                "fresh file. If this is a different scan than whatever wrote the "
+                "existing rows, choose a different output directory."
+            )
         self._next_reading_id = 0
         self._row_buffer: list[dict] = []
 

@@ -68,6 +68,7 @@ Typical usage
 
 from __future__ import annotations
 
+import os
 import time
 from typing import Optional
 
@@ -106,6 +107,25 @@ class OESStore:
         self.y_coords = np.asarray(y_coords_mm, dtype="float32")
         self.n_passes = int(n_passes)
         self._initialized = False
+
+        # Loud, not silent: _initialize() below opens this path with
+        # h5py.File(path, "w") on the first write_point() call -- "w" mode
+        # TRUNCATES an existing file. Reusing output.base_dir from an
+        # earlier scan (e.g. the default ./scan_data left unchanged
+        # between runs) means the PREVIOUS scan's entire oes.h5 is
+        # silently destroyed the moment this scan writes its first point,
+        # with no prompt and no backup. Opposite failure mode from
+        # DataLogger's summary CSV (which appends instead -- see that
+        # class's own warning), but the same root cause: nothing in this
+        # codebase checks for or timestamps a reused output directory.
+        if os.path.exists(self.path):
+            print(
+                f"WARNING: {self.path} already exists and will be OVERWRITTEN "
+                "(replaced, not appended) on the first write_point() call. If this "
+                "is a different scan than whatever wrote the existing file, point "
+                "a different output.base_dir / output.oes_hdf5 at it first, or "
+                "move/rename the existing file now."
+            )
 
     # ------------------------------------------------------------------
     # Internal

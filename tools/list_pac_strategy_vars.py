@@ -86,7 +86,9 @@ def main():
                               "and print every variable.")
     args = parser.parse_args()
 
-    with open(args.config) as f:
+    # utf-8-sig: see run_gui.py's copy of this comment -- tolerates/strips a
+    # UTF-8 BOM (e.g. from editing config.yaml in Notepad on Windows).
+    with open(args.config, encoding="utf-8-sig") as f:
         config = yaml.safe_load(f)
 
     pac = config["ir"]["pac"]

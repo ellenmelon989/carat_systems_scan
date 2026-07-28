@@ -679,7 +679,11 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    with open(args.config) as f:
+    # utf-8-sig: see run_gui.py's copy of this comment -- tolerates/strips
+    # a UTF-8 BOM (e.g. from editing config.yaml in Notepad on Windows),
+    # no-op if absent. Matches gui/calibration_panel.py and
+    # scan/calibrate_scan_area.py's own config.yaml reads.
+    with open(args.config, encoding="utf-8-sig") as f:
         config = yaml.safe_load(f)
 
     if args.smoke_test:

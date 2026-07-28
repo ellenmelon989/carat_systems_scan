@@ -85,6 +85,31 @@ class DataLogger:
         os.makedirs(self.base_dir, exist_ok=True)
         os.makedirs(self.spectra_dir, exist_ok=True)
 
+        # Loud, not silent: reusing an output.base_dir from an earlier scan
+        # (e.g. the default ./scan_data left unchanged between runs) means
+        # _append_summary_row below opens summary_path in "a" (append)
+        # mode -- write_header only fires when the file doesn't already
+        # exist, so a pre-existing summary CSV silently gets a SECOND
+        # scan's rows appended under the FIRST scan's header, with
+        # point_id restarting from 0 and no column-count check between the
+        # two runs. That's silent data corruption for anything downstream
+        # (map_plotter.py, manual analysis) that assumes one CSV == one
+        # scan. This can't be fixed by refusing to run (a genuine
+        # multi-session append might be intentional), so at minimum make
+        # it visible: warn once, here, before anything is written.
+        if os.path.exists(self.summary_path):
+            # self.log_event (not print): writes to BOTH stdout and
+            # scan_log.txt in this same base_dir, so the warning survives
+            # in the record even if nobody was watching the console when
+            # the scan started.
+            self.log_event(
+                f"WARNING: {self.summary_path} already exists — new rows will be "
+                "APPENDED to it (point_id restarts from 0), not written to a fresh "
+                "file. If this is a different scan than whatever wrote the existing "
+                "rows, point a different output.base_dir at it first or move/rename "
+                "the existing scan_data directory."
+            )
+
     def log_event(self, message):
         """Append a timestamped message to the runtime log."""
         timestamp = datetime.now().isoformat()

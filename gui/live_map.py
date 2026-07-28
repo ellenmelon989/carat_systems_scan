@@ -77,6 +77,20 @@ class LiveMapPanel(ttk.Frame):
         x0, x1 = x_range_mm
         y0, y1 = y_range_mm
 
+        # Remove any existing colorbar BEFORE clearing self.ax, not after.
+        # self.ax.clear() on newer matplotlib implicitly detaches/removes
+        # any colorbar already attached to that axes as a side effect of
+        # clearing it. The previous order (clear() first, then
+        # self._cbar.remove()) tried to explicitly remove an axes
+        # matplotlib had already torn down, which surfaced as either
+        # AttributeError: 'NoneType' object has no attribute
+        # 'set_subplotspec' or KeyError: <Axes: label='<colorbar>'>
+        # depending on exactly how far the stale internal state got before
+        # failing -- both are the same root cause.
+        if self._cbar is not None:
+            self._cbar.remove()
+            self._cbar = None
+
         self.ax.clear()
         self.im = self.ax.imshow(
             self.accumulator.value_grid, origin="lower", extent=[x0, x1, y0, y1],
@@ -86,8 +100,6 @@ class LiveMapPanel(ttk.Frame):
         self.ax.set_ylabel("y (mm)")
         self.ax.set_title("IR temperature — live")
 
-        if self._cbar is not None:
-            self._cbar.remove()
         self._cbar = self.figure.colorbar(self.im, ax=self.ax)
         self._cbar.set_label("°C")
 

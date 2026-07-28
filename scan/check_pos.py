@@ -18,7 +18,9 @@ if _REPO_ROOT not in _sys.path:
 import yaml
 from motion.motion_controller import get_motion_controller
 
-with open(_os.path.join(_REPO_ROOT, "config.yaml")) as f:
+# utf-8-sig: see run_gui.py's copy of this comment -- tolerates/strips a
+# UTF-8 BOM (e.g. from editing config.yaml in Notepad on Windows).
+with open(_os.path.join(_REPO_ROOT, "config.yaml"), encoding="utf-8-sig") as f:
     config = yaml.safe_load(f)
 
 motion = get_motion_controller(config)

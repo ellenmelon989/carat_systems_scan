@@ -33,7 +33,7 @@ from tkinter.scrolledtext import ScrolledText
 
 import yaml
 
-from motion.motion_controller import get_motion_controller
+from motion.motion_controller import AxisStateUnknown, MotionFault, get_motion_controller
 import scan.scan_params as scan_params
 from scan.calibrate_scan_area import (
     CLEARANCE_CHECK_STEP_MM,
@@ -226,7 +226,53 @@ class CalibrationPanel(ttk.Frame):
             return
         dx = dx_sign * self.jog_step_mm
         dy = dy_sign * self.jog_step_mm
-        self.motion.jog(dx_mm=dx, dy_mm=dy)
+
+        # self.motion.jog() previously had NO error handling here: a
+        # MotionFault/AxisStateUnknown raised out of it (e.g. an axis that
+        # didn't stop within move_timeout_s) propagated straight out of
+        # this Tk callback, where Tk's default handler just prints
+        # "Exception in Tkinter callback" to the console and swallows it.
+        # The operator saw nothing on screen, jog stayed enabled, and
+        # holding an arrow key could re-trigger the same fault repeatedly
+        # with zero indication anything was wrong -- exactly what happened
+        # on 2026-07-28 (7 consecutive silent MotionFault timeouts on
+        # axis 1 during arrow-key jogging). Route both fault types through
+        # the operator-visible log + dialog instead, matching how the jog
+        # checkpoint's "not confirmed" path (below) and run_scan's
+        # axis_fault status already treat hardware faults as something the
+        # operator must be told about, not something to fail silently.
+        try:
+            self.motion.jog(dx_mm=dx, dy_mm=dy)
+        except AxisStateUnknown as exc:
+            # Real state unknown -- MUST NOT jog again without a manual
+            # check (see that exception's own docstring). _abort() is the
+            # same "unsafe, stop and reset" response already used below
+            # for an unconfirmed jog checkpoint: disables jogging, closes
+            # the motion connection, resets calibration state to idle, and
+            # puts the fault in front of the operator via a blocking
+            # error dialog rather than a console-only traceback.
+            self._abort(f"Motion fault during jog: {exc}")
+            return
+        except MotionFault as exc:
+            # Axis timed out but the follow-up stop() was confirmed -- the
+            # hardware is idle and it's technically safe to jog again, but
+            # the operator still needs to know a jog just silently failed
+            # (typically means the mount hit a mechanical limit or a
+            # steps_per_mm miscalibration turned a small jog into a much
+            # larger commanded move than intended). Log + surface it, but
+            # don't force a full abort/reset the way AxisStateUnknown does.
+            self._log(f"JOG FAULT (axis confirmed stopped): {exc}")
+            messagebox.showwarning(
+                "Jog fault",
+                f"{exc}\n\nThe axis is confirmed stopped and safe to jog "
+                "again, but check that the mount didn't hit a mechanical "
+                "limit, and that steps_per_mm is actually calibrated for "
+                "this hardware (still the uncalibrated default until "
+                "Apply is used on the steps_per_mm step).",
+            )
+            self._refresh_position()
+            return
+
         self._moved_since_checkpoint += abs(dx) + abs(dy)
         self._refresh_position()
 

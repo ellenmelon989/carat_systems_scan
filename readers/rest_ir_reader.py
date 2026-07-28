@@ -102,7 +102,9 @@ class RestApiIRReader(IRReader):
 
 if __name__ == "__main__":
     import yaml
-    with open("config.yaml") as f:
+    # utf-8-sig: see run_gui.py's copy of this comment -- tolerates/strips a
+    # UTF-8 BOM (e.g. from editing config.yaml in Notepad on Windows).
+    with open("config.yaml", encoding="utf-8-sig") as f:
         config = yaml.safe_load(f)
     pac = config["ir"]["pac"]
     reader = RestApiIRReader(

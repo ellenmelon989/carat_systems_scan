@@ -29,7 +29,17 @@ def main():
     )
     args = parser.parse_args()
 
-    with open(args.config) as f:
+    # utf-8-sig: tolerates (and strips) a UTF-8 BOM if one is present,
+    # transparent no-op if not -- config.yaml is a hand-edited file an
+    # operator may open/save in Notepad on Windows, which can add a BOM.
+    # A BOM landing on the first key (e.g. "﻿scan:") makes
+    # yaml.safe_load either error or silently misparse the top-level key,
+    # so config["scan"] etc. below would KeyError. gui/calibration_panel.py
+    # and scan/calibrate_scan_area.py already guard against this when
+    # re-reading config.yaml after a Calibrate-tab write; this is the same
+    # guard applied to every other place config.yaml gets read, including
+    # this one -- the GUI's own entry point, which previously did not have it.
+    with open(args.config, encoding="utf-8-sig") as f:
         config = yaml.safe_load(f)
 
     # config_path is threaded through to the Calibrate tab (see
