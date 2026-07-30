@@ -30,43 +30,89 @@ scan:
     every_n_points: 200
 
 motion:
-  controller: newport_8742
-  interface: usb            # "usb" or "ethernet"
-  host: "192.168.100.2"     # only used when interface: ethernet — replace with actual IP
-  usb_index: 0              # only used when interface: usb
-  steps_per_mm_x: 500       # fill in after calibration
-  steps_per_mm_y: 500       # fill in after calibration
-  invert_x: false           # set true if jogging +X/+Y ever visibly moves the mirror the
-  invert_y: false           # OPPOSITE direction on-site -- a wiring/mounting fact, found by
-                             # jogging and watching, not something to guess in advance. See
-                             # motion/real_newport_motion.py's module docstring for why this
-                             # is separate from steps_per_mm_x/y's own (always-positive) sign.
-  # Calibration must be run at move_velocity below (open-loop step size is
-  # velocity-dependent) — re-run calibration if move_velocity changes.
-  calibration_date: null           # fill in: date steps_per_mm was measured
-  calibration_velocity_sps: null   # fill in: velocity used during calibration (should match move_velocity)
-  calibration_direction: null      # fill in: "+x"/"-x"/"+y"/"-y" — hysteresis makes direction matter
-  home_velocity: 200        # steps/s during homing (slow, avoids crashing into hard stop)
-  home_steps: 100000         # max steps driven toward the hard stop during a hard home.
-                              # Blind guess for now — calibrate_scan_area.py can suggest a
-                              # tighter, calibration-derived bound once steps_per_mm_x/y
-                              # (below) are for real, not the placeholder.
-  home_timeout_s: 300        # bumped from the 60s code default (2026-07-11): at
-                              # home_velocity=200 steps/s, 60s only covers 12,000 steps —
-                              # less than home_steps=100000 — so home() was timing out
-                              # before ever reaching the real hard stop. 300s gives ~60,000
-                              # steps of headroom at this velocity. Once steps_per_mm and
-                              # home_steps are calibrated for real, both this and
-                              # home_velocity can likely come back down.
-  move_velocity: 2000       # steps/s during scan moves — calibrate steps_per_mm at THIS velocity
-  axis_x: 1
-  axis_y: 2
+  # 2026-07-29: switched from newport_8742 (open-loop picomotor + 8816-6) to
+  # conex_agap (closed-loop CONEX-AGAP + AG-M100D mirror mount) -- see
+  # motion/real_conexagap_motion.py's module docstring for the full
+  # rationale, the state-machine differences, and why steps_per_mm_x/y below
+  # are reused (they're really deg/mm for this controller, not steps/mm).
+  # The old newport_8742 block is kept commented out below for reference/
+  # rollback -- don't delete it until the CONEX-AGAP is confirmed reliable
+  # on-site.
+  controller: conex_agap
+  port: "COM5"                # REQUIRED -- Windows COM port (Device Manager >
+                               # Ports (COM & LPT), once the Newport USB driver
+                               # from "USB Driver Installation Manual.pdf" is
+                               # installed). Find with:
+                               #   python motion/real_conexagap_motion.py --list-ports
+  controller_address: 1       # CONEX-AGAP factory default over USB (only
+                               # matters if reconfigured for RS-485).
+  axis_x: "U"                 # which CONEX axis LETTER ('U' or 'V') drives
+  axis_y: "V"                 # scan-grid X/Y -- CONFIRM by jogging each letter
+                               # individually and watching the mirror, same as
+                               # axis_x/axis_y were confirmed for the 8742.
+                               # Don't assume U=X.
+  steps_per_mm_x: 500         # really "deg per mm at the plasma surface" for
+  steps_per_mm_y: 500         # this controller -- fill in after calibration
+                               # (same calibrate_scan_area.py / Calibrate tab
+                               # workflow as before; the key names are reused
+                               # on purpose, see module docstring).
+  invert_x: false             # set true if jogging +X/+Y ever visibly moves
+  invert_y: false             # the mirror the OPPOSITE direction on-site --
+                               # re-verify independently of the 8742's old
+                               # invert_y: true, wiring may differ on the new
+                               # mount.
+  calibration_date: null           # fill in: date steps_per_mm (deg/mm) was measured
+  calibration_direction: null      # fill in: "+x"/"-x"/"+y"/"-y"
+  hard_home: false            # false = anchor origin at current position when
+                               # home() is called (fiducial workflow, same as
+                               # before). true = anchor at the CONEX-AGAP's own
+                               # absolute zero (0 deg both axes) -- see module
+                               # docstring's HOMING / ORIGIN section for why
+                               # that's safe here (repeatable closed-loop
+                               # reading) unlike the 8742's hard-stop crash-
+                               # into-a-wall homing.
+  move_timeout_s: 30          # per-axis move timeout (settle poll)
+  stop_confirm_timeout_s: 10  # how long to wait for an explicit ST to land
   homing_required: true
   soft_limits:
     x_min_mm: 0
     x_max_mm: 50
     y_min_mm: 0
     y_max_mm: 50
+    # NOTE: the CONEX-AGAP's own hardware software limits (SL/SR) cap each
+    # axis to roughly +/-1 degree of mirror tilt -- a much smaller absolute
+    # range than the 8742's open-loop step space. Once steps_per_mm_x/y
+    # (deg/mm) are calibrated for real, double check these mm limits still
+    # map to something inside +/-1 deg, don't just carry over the 8742's
+    # numbers unchanged.
+
+  # --- Previous hardware (newport_8742 + 8816-6, open-loop picomotor) ---
+  # controller: newport_8742
+  # interface: usb            # "usb" or "ethernet"
+  # host: "192.168.100.2"     # only used when interface: ethernet — replace with actual IP
+  # usb_index: 0              # only used when interface: usb
+  # steps_per_mm_x: 500       # fill in after calibration
+  # steps_per_mm_y: 500       # fill in after calibration
+  # invert_x: false           # set true if jogging +X/+Y ever visibly moves the mirror the
+  # invert_y: false           # OPPOSITE direction on-site -- a wiring/mounting fact, found by
+  #                            # jogging and watching, not something to guess in advance. See
+  #                            # motion/real_newport_motion.py's module docstring for why this
+  #                            # is separate from steps_per_mm_x/y's own (always-positive) sign.
+  # calibration_date: null
+  # calibration_velocity_sps: null
+  # calibration_direction: null
+  # home_velocity: 200        # steps/s during homing (slow, avoids crashing into hard stop)
+  # home_steps: 100000        # max steps driven toward the hard stop during a hard home.
+  # home_timeout_s: 300
+  # move_velocity: 2000       # steps/s during scan moves — calibrate steps_per_mm at THIS velocity
+  # axis_x: 1
+  # axis_y: 2
+  # hard_home: false
+  # soft_limits:
+  #   x_min_mm: 0
+  #   x_max_mm: 50
+  #   y_min_mm: 0
+  #   y_max_mm: 50
 
 ir:
   source: pac          # pac | mock — REST/PAC is the only real backend wired up

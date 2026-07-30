@@ -5,9 +5,11 @@ Responsible for motor communication, homing, position commands,
 limits, and settling for the 2D scanning mirror.
 
 Provides a hardware abstraction: MotionController (abstract),
-MockMotionController (for development without hardware), and
-NewportPicomotorController (real Newport 8742 hardware, see
-real_newport_motion.py).
+MockMotionController (for development without hardware),
+NewportPicomotorController (real Newport 8742 + 8816-6 hardware, see
+real_newport_motion.py -- open-loop, being phased out), and
+ConexAGAPController (real Newport CONEX-AGAP + AG-M100D hardware, see
+real_conexagap_motion.py -- closed-loop, its replacement).
 """
 
 from abc import ABC, abstractmethod
@@ -165,7 +167,13 @@ def get_motion_controller(config):
 
     Supported controller types:
       null / omitted   → MockMotionController (development)
-      newport_8742      → NewportPicomotorController (real hardware)
+      newport_8742      → NewportPicomotorController (real hardware; open-loop
+                           8742 + 8816-6 picomotor mount -- being phased out,
+                           see real_newport_motion.py)
+      conex_agap         → ConexAGAPController (real hardware; closed-loop
+                           CONEX-AGAP + AG-M100D mirror mount -- see
+                           real_conexagap_motion.py for why this replaces
+                           newport_8742 and what config keys it needs)
     """
     motion_cfg = config.get("motion", {})
     controller_type = motion_cfg.get("controller")
@@ -183,9 +191,18 @@ def get_motion_controller(config):
             from real_newport_motion import NewportPicomotorController
         return NewportPicomotorController(config)
 
+    if controller_type == "conex_agap":
+        try:
+            from .real_conexagap_motion import ConexAGAPController
+        except ImportError:
+            # Fallback for running this file directly, where relative imports
+            # don't work because there's no parent package.
+            from real_conexagap_motion import ConexAGAPController
+        return ConexAGAPController(config)
+
     raise ValueError(
         f"Unknown motion controller type: '{controller_type}'. "
-        "Supported: newport_8742 | null (mock)"
+        "Supported: newport_8742 | conex_agap | null (mock)"
     )
 
 

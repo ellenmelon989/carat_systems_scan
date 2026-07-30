@@ -12,4 +12,5 @@ h5py
 xarray
 pylablib
 
-# Motion controller - add once hardware is identified
+# Motion controller: newport_8742 (pylablib, above) or conex_agap (pyserial,
+# already listed above -- no new dependency). See motion/real_conexagap_motion.py.
