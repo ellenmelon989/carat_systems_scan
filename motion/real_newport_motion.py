@@ -82,6 +82,15 @@ As context manager:
         ...
 """
 
+# Deferred (string, non-evaluated) annotations -- REQUIRED for
+# `-> tuple[float, float]` below (PEP 585 bare-generic subscripting) to
+# not raise `TypeError: 'type' object is not subscriptable` at class-
+# definition time on Python 3.8, the last version officially supported
+# on Windows 7. Found 2026-07-30 while auditing the CONEX-AGAP driver
+# for the same issue -- this file had never actually been run under
+# Python 3.8 (only 3.10/3.11 in this sandbox), so the bug was latent.
+from __future__ import annotations
+
 import time
 import logging
 

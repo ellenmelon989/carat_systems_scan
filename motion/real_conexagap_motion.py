@@ -155,6 +155,14 @@ Usage
     mc.close()
 """
 
+# Deferred (string, non-evaluated) annotations -- REQUIRED for
+# `-> tuple[float, float]` below (PEP 585 bare-generic subscripting) to
+# not raise `TypeError: 'type' object is not subscriptable` at class-
+# definition time on Python 3.8, the last version officially supported
+# on Windows 7 (this box's OS -- see module docstring). Cheap, always-
+# safe to include even on newer interpreters.
+from __future__ import annotations
+
 import time
 import logging
 
@@ -524,9 +532,20 @@ class ConexAGAPController(MotionController):
     def _query(self, command: str) -> str:
         """
         Send a query command (ends in '?', or TS/TE/TB/VE/ID) and return
-        the response with the "{address}{2-letter-cmd}[axis]" prefix
-        stripped off, e.g. querying "1TP U?" returns just the numeric
-        string.
+        the response with the "{address}{command}" prefix stripped off,
+        e.g. querying "1TPU?" returns just the numeric string.
+
+        Prefix is derived from the exact command string just sent
+        (minus a trailing '?', if any) rather than by scanning the
+        response for a run of leading alphabetic characters. An earlier
+        version of this method did the latter and had a real bug: for
+        "1ID?" the reply is "1IDAG-M100D" (stage identifier "AG-M100D"
+        starts with letters too), so alpha-scanning ate into the value
+        itself ("AG-M100D" -> mangled to "-M100D"). Anchoring the strip
+        length to what was actually sent has no such ambiguity, since
+        the controller always echoes address+command verbatim before
+        the value (see the worked examples throughout the Controller
+        Documentation, e.g. "1TS000032", "1TB@ No error").
         """
         line = command + _TERMINATOR
         logger.debug("-> %s", command)
@@ -540,16 +559,21 @@ class ConexAGAPController(MotionController):
             )
         resp = raw.decode("ascii", errors="replace").strip()
         logger.debug("<- %s", resp)
-        # Strip the leading "{address}{cmd-letters}" the controller echoes
-        # back. The command name is everything up to the first digit/'?'/
-        # sign in the parameter position; simplest robust approach is to
-        # strip the address digits then the alphabetic command+axis prefix.
-        addr_str = str(self._address)
-        body = resp[len(addr_str):] if resp.startswith(addr_str) else resp
-        i = 0
-        while i < len(body) and (body[i].isalpha()):
-            i += 1
-        return body[i:]
+        prefix = command[:-1] if command.endswith("?") else command
+        if resp.upper().startswith(prefix.upper()):
+            return resp[len(prefix):]
+        # Unexpected echo shape (firmware quirk, or a controller-level
+        # error string like "1TS@" style reply we didn't anticipate) --
+        # don't guess further, hand back the full response so the
+        # caller's own parsing (e.g. float()) fails loudly with the
+        # actual text visible, rather than silently returning a
+        # mis-sliced value.
+        logger.warning(
+            "Response %r to %r didn't start with expected prefix %r -- "
+            "returning it unparsed.",
+            resp, command, prefix,
+        )
+        return resp
 
     def _get_axis_position(self, axis_letter: str) -> float:
         """Live TP[a]? query, in native degrees."""
@@ -743,15 +767,18 @@ if __name__ == "__main__":
         mc.home()
         print(f"Position (mm, using placeholder deg/mm): {mc.get_position()}")
 
+        # --jog-u/--jog-v always address the raw CONEX axis letter directly
+        # (not scan-grid X/Y) -- this is a wiring/direction smoke test, run
+        # before axis_x/axis_y in config.yaml are even decided.
         if args.jog_u is not None:
             print(f"\n=== Jogging axis U by {args.jog_u} deg (relative, raw PR) ===")
-            mc._send(f"{mc._address}PR{mc._axis_x if mc._axis_x == 'U' else mc._axis_y}{args.jog_u:.6f}")
+            mc._send(f"{mc._address}PRU{args.jog_u:.6f}")
             mc._wait_move(label="jog U")
             print(f"Raw TP: U={mc._get_axis_position('U'):.5f}  V={mc._get_axis_position('V'):.5f}")
 
         if args.jog_v is not None:
             print(f"\n=== Jogging axis V by {args.jog_v} deg (relative, raw PR) ===")
-            mc._send(f"{mc._address}PR{mc._axis_y if mc._axis_y == 'V' else mc._axis_x}{args.jog_v:.6f}")
+            mc._send(f"{mc._address}PRV{args.jog_v:.6f}")
             mc._wait_move(label="jog V")
             print(f"Raw TP: U={mc._get_axis_position('U'):.5f}  V={mc._get_axis_position('V'):.5f}")
 
