@@ -39,13 +39,17 @@ motion:
   # rollback -- don't delete it until the CONEX-AGAP is confirmed reliable
   # on-site.
   controller: conex_agap
-  port: "COM5"                # REQUIRED -- Windows COM port (Device Manager >
+  port: "COM4"                # REQUIRED -- Windows COM port (Device Manager >
                                # Ports (COM & LPT), once the Newport USB driver
                                # from "USB Driver Installation Manual.pdf" is
                                # installed). Find with:
                                #   python motion/real_conexagap_motion.py --list-ports
   controller_address: 1       # CONEX-AGAP factory default over USB (only
                                # matters if reconfigured for RS-485).
+  motion_enabled: false       # FAIL-CLOSED operator interlock. Leave false
+                               # during connection checks and axis recovery.
+  calibration_confirmed: false # Set true only after replacing the old 8742
+                                # ratios with measured CONEX degrees/mm values.
   axis_x: "U"                 # which CONEX axis LETTER ('U' or 'V') drives
   axis_y: "V"                 # scan-grid X/Y -- CONFIRM by jogging each letter
                                # individually and watching the mirror, same as
@@ -73,6 +77,7 @@ motion:
                                # into-a-wall homing.
   move_timeout_s: 30          # per-axis move timeout (settle poll)
   stop_confirm_timeout_s: 10  # how long to wait for an explicit ST to land
+  serial_timeout_s: 2         # seconds to wait for each controller reply
   homing_required: true
   soft_limits:
     x_min_mm: 0

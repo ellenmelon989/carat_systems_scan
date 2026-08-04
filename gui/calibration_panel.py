@@ -227,7 +227,7 @@ class CalibrationPanel(ttk.Frame):
         dx = dx_sign * self.jog_step_mm
         dy = dy_sign * self.jog_step_mm
 
-        # self.motion.jog() previously had NO error handling here: a
+        # self.motion.calibration_jog() previously had NO error handling here: a
         # MotionFault/AxisStateUnknown raised out of it (e.g. an axis that
         # didn't stop within move_timeout_s) propagated straight out of
         # this Tk callback, where Tk's default handler just prints
@@ -242,7 +242,7 @@ class CalibrationPanel(ttk.Frame):
         # axis_fault status already treat hardware faults as something the
         # operator must be told about, not something to fail silently.
         try:
-            self.motion.jog(dx_mm=dx, dy_mm=dy)
+            self.motion.calibration_jog(dx_mm=dx, dy_mm=dy)
         except AxisStateUnknown as exc:
             # Real state unknown -- MUST NOT jog again without a manual
             # check (see that exception's own docstring). _abort() is the
@@ -378,7 +378,7 @@ class CalibrationPanel(ttk.Frame):
         ]
         self._log("Running clearance check (small test jog in each direction)...")
         for label, dx, dy in directions:
-            self.motion.jog(dx_mm=dx, dy_mm=dy)
+            self.motion.calibration_jog(dx_mm=dx, dy_mm=dy)
             self._refresh_position()
             if not messagebox.askyesno("Clearance check", f"Jogged {label}. Did the spot visibly move?"):
                 self._abort(
