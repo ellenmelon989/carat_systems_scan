@@ -123,6 +123,27 @@ class MotionController(ABC):
         self.move_to(x + dx_mm, y + dy_mm)
         self.wait_for_settle(0.0)
 
+    def calibration_jog(self, dx_mm: float = 0.0, dy_mm: float = 0.0):
+        """
+        Relative move by (dx_mm, dy_mm), for use ONLY by the interactive
+        calibration workflow (calibrate_scan_area.py / gui/calibration_panel.py)
+        — i.e. before scan-grid calibration exists yet.
+
+        Default implementation is identical to jog(): most controllers gate
+        motion the same way regardless of calibration state, so this is a
+        no-op distinction for them. ConexAGAPController overrides it: that
+        driver's ordinary move_to() (and therefore jog()) additionally
+        requires motion.calibration_confirmed, a flag that can only honestly
+        be set AFTER this same jog-to-the-4-edges workflow has produced real
+        measured deg/mm numbers. Routing the calibration workflow through
+        calibration_jog() instead of jog() breaks that chicken-and-egg: it
+        still requires motion.motion_enabled and still validates against
+        live controller limits, it just doesn't require calibration to
+        already be confirmed. See ConexAGAPController.calibration_jog()'s
+        docstring for the full rationale.
+        """
+        self.jog(dx_mm=dx_mm, dy_mm=dy_mm)
+
 
 class MockMotionController(MotionController):
     """

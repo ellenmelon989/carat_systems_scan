@@ -152,6 +152,38 @@ class ConexSafetyTests(unittest.TestCase):
         self.assertIn("1PAU0.100000", fake.commands)
         self.assertIn("1PAV0.200000", fake.commands)
 
+    def test_calibration_jog_requires_motion_interlock(self):
+        fake = FakeConexSerial()
+        controller = self.make_controller(fake)
+        controller.home()
+        with self.assertRaisesRegex(MotionFault, "motion_enabled"):
+            controller.calibration_jog(dx_mm=1.0)
+        self.assert_no_motion_command(fake)
+
+    def test_calibration_jog_does_not_require_confirmed_calibration(self):
+        fake = FakeConexSerial()
+        controller = self.make_controller(fake, motion_enabled=True)
+        controller.home()
+        # calibration_confirmed is still False here -- would block move_to()
+        # (see test_move_requires_confirmed_calibration). calibration_jog()
+        # must NOT require it: it's the jog loop that MEASURES
+        # steps_per_mm_x/y in the first place (gui/calibration_panel.py,
+        # calibrate_scan_area.py), before calibration_confirmed can honestly
+        # be set true.
+        controller.calibration_jog(dx_mm=10.0, dy_mm=20.0)
+        self.assertIn("1PAU0.100000", fake.commands)
+        self.assertIn("1PAV0.200000", fake.commands)
+
+    def test_calibration_jog_still_validates_target_against_live_limits(self):
+        fake = FakeConexSerial()
+        controller = self.make_controller(
+            fake, motion_enabled=True, steps_per_mm_x=1.0, steps_per_mm_y=0.01
+        )
+        controller.home()
+        with self.assertRaisesRegex(MotionFault, "outside stored limits"):
+            controller.calibration_jog(dx_mm=2.0)
+        self.assert_no_motion_command(fake)
+
     def test_raw_axis_jog_uses_live_position_not_stale_relative_target(self):
         fake = FakeConexSerial(position_u=0.2)
         controller = self.make_controller(fake, motion_enabled=True)

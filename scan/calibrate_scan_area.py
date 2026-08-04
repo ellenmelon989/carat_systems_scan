@@ -32,7 +32,7 @@ Workflow
      - Elsewhere (this dev sandbox, Mac/Linux terminals): typed w/a/s/d +
        Enter. Raw arrow-key capture is OS-specific and this is a command-
        line lab-instrument script rather than a GUI, so the fallback keeps
-       it dependency-free; both paths call the same motion.jog().
+       it dependency-free; both paths call the same motion.calibration_jog().
 5. Optionally derive steps_per_mm_x/y from those same 4 edges (see
    calibrate_steps_per_mm()) — no new hardware call needed. The mm
    values just recorded were computed from raw motor steps using
@@ -181,7 +181,7 @@ except ImportError:
 
 
 # ---------------------------------------------------------------------------
-# Jog loops — same motion.jog() calls underneath, different input methods
+# Jog loops — same motion.calibration_jog() calls underneath, different input methods
 # ---------------------------------------------------------------------------
 
 def _jog_checkpoint(moved_since_checkpoint_mm):
@@ -235,16 +235,16 @@ def _jog_loop_msvcrt(motion, jog_step_mm, checkpoint_interval_mm=JOG_CHECKPOINT_
             arrow = msvcrt.getch()
             moved = 0.0
             if arrow == b"H":      # up
-                motion.jog(dy_mm=jog_step_mm)
+                motion.calibration_jog(dy_mm=jog_step_mm)
                 moved = jog_step_mm
             elif arrow == b"P":    # down
-                motion.jog(dy_mm=-jog_step_mm)
+                motion.calibration_jog(dy_mm=-jog_step_mm)
                 moved = jog_step_mm
             elif arrow == b"K":    # left
-                motion.jog(dx_mm=-jog_step_mm)
+                motion.calibration_jog(dx_mm=-jog_step_mm)
                 moved = jog_step_mm
             elif arrow == b"M":    # right
-                motion.jog(dx_mm=jog_step_mm)
+                motion.calibration_jog(dx_mm=jog_step_mm)
                 moved = jog_step_mm
             moved_since_checkpoint += moved
             if moved_since_checkpoint >= checkpoint_interval_mm:
@@ -272,13 +272,13 @@ def _jog_loop_typed(motion, jog_step_mm, checkpoint_interval_mm=JOG_CHECKPOINT_I
             jog_step_mm = max(JOG_STEP_MIN_MM, jog_step_mm / 2)
         elif cmd in ("w", "s", "a", "d"):
             if cmd == "w":
-                motion.jog(dy_mm=jog_step_mm)
+                motion.calibration_jog(dy_mm=jog_step_mm)
             elif cmd == "s":
-                motion.jog(dy_mm=-jog_step_mm)
+                motion.calibration_jog(dy_mm=-jog_step_mm)
             elif cmd == "a":
-                motion.jog(dx_mm=-jog_step_mm)
+                motion.calibration_jog(dx_mm=-jog_step_mm)
             elif cmd == "d":
-                motion.jog(dx_mm=jog_step_mm)
+                motion.calibration_jog(dx_mm=jog_step_mm)
             moved_since_checkpoint += jog_step_mm
             if moved_since_checkpoint >= checkpoint_interval_mm:
                 _jog_checkpoint(moved_since_checkpoint)
@@ -341,7 +341,7 @@ def clearance_check(motion, test_step_mm=CLEARANCE_CHECK_STEP_MM):
         ("DOWN (-Y)", 0.0, -test_step_mm),
     ]
     for label, dx, dy in directions:
-        motion.jog(dx_mm=dx, dy_mm=dy)
+        motion.calibration_jog(dx_mm=dx, dy_mm=dy)
         resp = input(f"  Jogged {label}. Did the spot visibly move? [Y/n] ").strip().lower()
         if resp == "n":
             raise RuntimeError(

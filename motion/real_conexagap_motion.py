@@ -638,12 +638,57 @@ class ConexAGAPController(MotionController):
         invert_y), offsets by the homed origin, and issues both axis
         PA commands. Returns immediately; call wait_for_settle() to
         block.
+
+        Requires motion.calibration_confirmed -- this is the path
+        scan_manager.py uses for real scan points, and steps_per_mm_x/y
+        must be real measured CONEX deg/mm by the time anything moves
+        this way. See calibration_jog() for the jog used to MEASURE
+        those numbers in the first place, before they can honestly be
+        confirmed.
         """
         if not self._homed:
             raise RuntimeError("Must call home() before move_to().")
+        self._move_to_impl(x_mm, y_mm, require_calibration=True)
 
-        self._require_motion_permission("move_to", require_calibration=True)
-        self._assert_current_positions_within_limits("move_to")
+    def calibration_jog(self, dx_mm: float = 0.0, dy_mm: float = 0.0):
+        """
+        Relative move by (dx_mm, dy_mm), for use ONLY by the interactive
+        calibration workflow (calibrate_scan_area.py / gui/calibration_panel.py).
+
+        Overrides MotionController.calibration_jog() -- see its docstring
+        for the full chicken-and-egg rationale. This still requires
+        motion.motion_enabled and still validates the computed target
+        against the controller's live SL/SR limits (via _move_to_impl,
+        the same code path move_to() uses); it just passes
+        require_calibration=False, since the wafer-edge jog loop this
+        feeds is exactly how motion.calibration_confirmed's inputs
+        (steps_per_mm_x/y, i.e. deg/mm) get measured, and move_to()'s
+        ordinary calibration_confirmed gate would otherwise block the
+        only workflow that can honestly satisfy it.
+        """
+        if not self._homed:
+            raise RuntimeError("Must call home() before calibration_jog().")
+        x, y = self.get_position()
+        self._move_to_impl(x + dx_mm, y + dy_mm, require_calibration=False)
+        self.wait_for_settle(0.0)
+
+    def _move_to_impl(self, x_mm: float, y_mm: float, require_calibration: bool):
+        """Shared absolute-move body for move_to() and calibration_jog().
+
+        require_calibration distinguishes a real scan move (must have
+        motion.calibration_confirmed) from a calibration-workflow jog
+        (must not, or the workflow that sets that flag could never run).
+        Every other guard -- motion_enabled, live-position-in-limits,
+        per-target-in-limits, validate-both-before-sending-either -- is
+        identical for both callers.
+        """
+        self._require_motion_permission(
+            "move_to" if require_calibration else "calibration jog",
+            require_calibration=require_calibration,
+        )
+        self._assert_current_positions_within_limits(
+            "move_to" if require_calibration else "calibration jog"
+        )
 
         target_u = self._origin_u + x_mm * self._eff_deg_per_mm_x
         target_v = self._origin_v + y_mm * self._eff_deg_per_mm_y
