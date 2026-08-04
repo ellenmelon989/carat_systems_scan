@@ -33,8 +33,11 @@ motion:
   # 2026-07-29: switched from newport_8742 (open-loop picomotor + 8816-6) to
   # conex_agap (closed-loop CONEX-AGAP + AG-M100D mirror mount) -- see
   # motion/real_conexagap_motion.py's module docstring for the full
-  # rationale, the state-machine differences, and why steps_per_mm_x/y below
-  # are reused (they're really deg/mm for this controller, not steps/mm).
+  # rationale and the state-machine differences. This controller has its
+  # OWN deg_per_mm_x/y config keys (2026-08 -- no longer reusing the 8742's
+  # steps_per_mm_x/y name; that reuse turned out to make the calibration
+  # workflow harder to reason about, not easier, and is what let a
+  # leftover 8742-scale value silently survive a controller swap).
   # The old newport_8742 block is kept commented out below for reference/
   # rollback -- don't delete it until the CONEX-AGAP is confirmed reliable
   # on-site.
@@ -48,24 +51,29 @@ motion:
                                # matters if reconfigured for RS-485).
   motion_enabled: false       # FAIL-CLOSED operator interlock. Leave false
                                # during connection checks and axis recovery.
-  calibration_confirmed: false # Set true only after replacing the old 8742
-                                # ratios with measured CONEX degrees/mm values.
+  calibration_confirmed: false # Set true only after deg_per_mm_x/y below are
+                                # real measured CONEX values, not the placeholder.
   axis_x: "U"                 # which CONEX axis LETTER ('U' or 'V') drives
   axis_y: "V"                 # scan-grid X/Y -- CONFIRM by jogging each letter
                                # individually and watching the mirror, same as
                                # axis_x/axis_y were confirmed for the 8742.
                                # Don't assume U=X.
-  steps_per_mm_x: 500         # really "deg per mm at the plasma surface" for
-  steps_per_mm_y: 500         # this controller -- fill in after calibration
-                               # (same calibrate_scan_area.py / Calibrate tab
-                               # workflow as before; the key names are reused
-                               # on purpose, see module docstring).
+  deg_per_mm_x: 0.05          # degrees of mirror tilt per mm at the wafer --
+  deg_per_mm_y: 0.05          # PLACEHOLDER, calibrate on-site. Use the
+                               # Calibrate tab / calibrate_scan_area.py's
+                               # degree-first workflow: jog in native degrees
+                               # (safe regardless of this value, see
+                               # calibration_jog_deg()/get_position_deg() in
+                               # real_conexagap_motion.py) to the wafer edges,
+                               # then supply a known true distance (e.g. wafer
+                               # diameter) to derive this directly -- no need
+                               # to already know it first.
   invert_x: false             # set true if jogging +X/+Y ever visibly moves
   invert_y: false             # the mirror the OPPOSITE direction on-site --
                                # re-verify independently of the 8742's old
                                # invert_y: true, wiring may differ on the new
                                # mount.
-  calibration_date: null           # fill in: date steps_per_mm (deg/mm) was measured
+  calibration_date: null           # fill in: date deg_per_mm_x/y was actually measured
   calibration_direction: null      # fill in: "+x"/"-x"/"+y"/"-y"
   hard_home: false            # false = anchor origin at current position when
                                # home() is called (fiducial workflow, same as
@@ -86,10 +94,10 @@ motion:
     y_max_mm: 50
     # NOTE: the CONEX-AGAP's own hardware software limits (SL/SR) cap each
     # axis to roughly +/-1 degree of mirror tilt -- a much smaller absolute
-    # range than the 8742's open-loop step space. Once steps_per_mm_x/y
-    # (deg/mm) are calibrated for real, double check these mm limits still
-    # map to something inside +/-1 deg, don't just carry over the 8742's
-    # numbers unchanged.
+    # range than the 8742's open-loop step space. Once deg_per_mm_x/y are
+    # calibrated for real, double check these mm limits still map to
+    # something inside +/-1 deg, don't just carry over the 8742's numbers
+    # unchanged.
 
   # --- Previous hardware (newport_8742 + 8816-6, open-loop picomotor) ---
   # controller: newport_8742

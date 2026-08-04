@@ -68,7 +68,7 @@ def grid_dims_from_range(x_range_mm, y_range_mm, step_size_mm: float):
 
     Rounds span/step_size to 6 decimal places before the integer round().
     Without this, ordinary floating-point noise carried through
-    calibrate_scan_area.py's edge/steps-per-mm math (e.g. a span landing
+    calibrate_scan_area.py's edge/deg-per-mm math (e.g. a span landing
     at 74.99999999999999 instead of an intended 75.0) can fall on the
     opposite side of round()'s tie-break boundary than the same nominal
     value does after being serialized to config.yaml at 4 decimal places
@@ -76,7 +76,7 @@ def grid_dims_from_range(x_range_mm, y_range_mm, step_size_mm: float):
     disagreeing on nx/ny between the calibration preview and the grid the
     scan actually runs (seen 2026-07-17: preview said 8x8=64, scan ran
     9x9=81). 6 decimal places (1e-6 mm) is far finer than any real
-    steps_per_mm calibration can resolve (~1e-4 mm at best), so this only
+    deg_per_mm calibration can resolve (~1e-4 mm at best), so this only
     absorbs float noise — it never masks a real, intended distinction.
     """
     step_size_mm = validate_step_size_mm(step_size_mm)

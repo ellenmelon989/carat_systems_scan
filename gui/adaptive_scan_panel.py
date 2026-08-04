@@ -68,10 +68,18 @@ from adaptive_scan.adaptive_scan_params import (
 )
 from gui.adaptive_scan_worker import run_adaptive_scan
 
-# Reuse the SAME jog-step constants the Calibrate tab uses (see
-# scan/calibrate_scan_area.py) rather than redefining a second set of
-# magic numbers -- both tabs jog the same physical mount the same way.
-from scan.calibrate_scan_area import JOG_STEP_DEFAULT_MM, JOG_STEP_MIN_MM, JOG_STEP_MAX_MM
+# This tab's own jog-step constants, in mm -- previously imported from
+# scan/calibrate_scan_area.py on the theory that both tabs jog the same
+# physical mount the same way. That stopped being true once the Calibrate
+# tab's jogging moved to native degrees (2026-08, see that module's
+# docstring): this tab jogs in mm against an ALREADY-calibrated
+# coordinate system (the operator positions on a known-good wafer signal,
+# not a fresh, uncalibrated setup), so mm is still the right unit here --
+# it just can't come from calibrate_scan_area.py anymore. Values kept
+# identical to what that module used before its rename.
+JOG_STEP_DEFAULT_MM = 1.0
+JOG_STEP_MIN_MM = 0.05
+JOG_STEP_MAX_MM = 10.0
 
 ARROW_KEYSYMS = {
     "Up": (0.0, 1.0),

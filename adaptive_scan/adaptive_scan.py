@@ -214,8 +214,14 @@ class AdaptiveRasterScanner:
     config : dict
         Same shape as the precision scan's config.yaml — used here for
         oes.features (signal dispatch), oes.feature_window_nm, and
-        motion.steps_per_mm_x/move_velocity (to convert reading_interval
+        motion.deg_per_mm_x/move_velocity (to convert reading_interval
         into an equivalent per-step jog distance — see _compute_step_mm).
+        NOTE: move_velocity is an 8742-only config key with no CONEX-AGAP
+        equivalent (that driver has no exposed velocity setting) -- the
+        "time_s" reading_interval mode below hasn't been re-verified for
+        deg_per_mm_x-scale numbers and may need its own CONEX-specific
+        conversion; "motor_pulses" mode is also 8742-specific (raw pulse
+        counts don't mean anything on a closed-loop degree controller).
     params : AdaptiveScanParams
         Already-validated operator parameters (spec §4) — build via
         AdaptiveScanParams.from_operator_input().
@@ -279,17 +285,28 @@ class AdaptiveRasterScanner:
         Convert the operator's reading_interval (spec §4 parameter 4) into
         an equivalent per-reading jog distance in mm.
 
-        motor_pulses mode: direct — pulses / steps_per_mm_x. Note this is
-        the one place a placeholder/uncalibrated steps_per_mm_x would
+        BOTH modes below were written for the 8742's steps_per_mm_x/
+        move_velocity (steps/s) model and have NOT been re-verified for
+        the CONEX-AGAP, which has no motor-pulse or exposed-velocity
+        concept at all -- move_velocity simply isn't a CONEX config key
+        (see real_conexagap_motion.py's module docstring), so "time_s"
+        mode below falls back to the 2000 placeholder regardless of the
+        real hardware. deg_per_mm_x is read in its place only so this
+        doesn't silently read a nonexistent steps_per_mm_x key -- it does
+        NOT make either mode CONEX-correct. Treat both modes as 8742-only
+        until this gets its own CONEX-specific pass.
+
+        motor_pulses mode: direct — pulses / deg_per_mm_x. Note this is
+        the one place a placeholder/uncalibrated deg_per_mm_x would
         distort real spacing, and per spec §7, a fixed pulse count maps to
         a DIFFERENT real mm distance depending on travel direction
         (backlash) — a known, accepted limitation of this mode, not
         something this conversion tries to correct.
 
         time_s mode: distance = configured move_velocity (steps/s) /
-        steps_per_mm_x, times the requested seconds — i.e. "how far the
+        deg_per_mm_x, times the requested seconds — i.e. "how far the
         stage would travel in this many seconds at the configured scan
-        velocity." This still bottoms out in the same steps_per_mm_x
+        velocity." This still bottoms out in the same deg_per_mm_x
         conversion, so it isn't immune to calibration error either, but it
         lets the operator reason in seconds rather than raw pulses, which
         is the UI-friendliness point made in spec §7 (not a true
@@ -298,11 +315,11 @@ class AdaptiveRasterScanner:
         out for a future revision).
         """
         motion_cfg = config.get("motion", {})
-        steps_per_mm_x = float(motion_cfg.get("steps_per_mm_x", 500))
+        deg_per_mm_x = float(motion_cfg.get("deg_per_mm_x", motion_cfg.get("steps_per_mm_x", 500)))
         if params.reading_interval_mode == "motor_pulses":
-            return params.reading_interval_value / steps_per_mm_x
+            return params.reading_interval_value / deg_per_mm_x
         move_velocity = float(motion_cfg.get("move_velocity", 2000))  # steps/s
-        velocity_mm_s = move_velocity / steps_per_mm_x
+        velocity_mm_s = move_velocity / deg_per_mm_x
         return params.reading_interval_value * velocity_mm_s
 
     # ------------------------------------------------------------------
@@ -654,7 +671,7 @@ if __name__ == "__main__":
     ir_reader = SimulatedWaferIRReader(motion)
 
     config = {
-        "motion": {"steps_per_mm_x": 500, "move_velocity": 2000},
+        "motion": {"deg_per_mm_x": 500, "move_velocity": 2000},
         "oes": {"features": {}, "feature_window_nm": 1.0},
     }
 

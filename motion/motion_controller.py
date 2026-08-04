@@ -144,6 +144,38 @@ class MotionController(ABC):
         """
         self.jog(dx_mm=dx_mm, dy_mm=dy_mm)
 
+    def calibration_jog_deg(self, dx_deg: float = 0.0, dy_deg: float = 0.0):
+        """
+        Relative move by (dx_deg, dy_deg) in the controller's OWN native
+        rotational unit (degrees), completely bypassing whatever mm
+        conversion factor the controller uses — i.e. safe to call even
+        before that factor is known at all.
+
+        No sensible default: a controller with no native "degrees of
+        tilt" concept (the open-loop linear-step 8742/picomotor, or the
+        mock) has nothing to bypass to, so the base implementation raises.
+        Only ConexAGAPController overrides this — see its docstring for
+        why a degree-first calibration pass matters specifically for that
+        controller (deg_per_mm_x/y can't safely be guessed at, unlike the
+        8742's steps_per_mm_x/y, because the CONEX's full travel is only
+        about a degree wide in either direction).
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} has no native rotational unit to jog "
+            "in -- use calibration_jog(dx_mm=..., dy_mm=...) instead."
+        )
+
+    def get_position_deg(self) -> tuple:
+        """
+        Live position in the controller's own native rotational unit
+        (degrees), relative to origin — the counterpart to
+        calibration_jog_deg(). See that method's docstring.
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} has no native rotational unit to "
+            "report position in -- use get_position() instead."
+        )
+
 
 class MockMotionController(MotionController):
     """

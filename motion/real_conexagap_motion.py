@@ -50,9 +50,9 @@ Consequences:
     (see the SL[a]/SR[a] command docs — range is exactly -1..0 and
     0..1 degrees respectively). motion.soft_limits (in mm, at the
     plasma surface) must convert to a target well inside that, via
-    steps_per_mm_x/y below — this is a much smaller absolute range
+    deg_per_mm_x/y below — this is a much smaller absolute range
     than the picomotor's open-loop step space, so recheck
-    soft_limits/steps_per_mm together on-site rather than assuming
+    soft_limits/deg_per_mm together on-site rather than assuming
     the old mm range still fits.
 
 COORDINATE SYSTEM / AXIS NAMING
@@ -68,28 +68,29 @@ single unit on USB). config keys axis_x/axis_y here hold 'U' or 'V'
 find this the same way axis_x/axis_y were found for the 8742: jog each
 letter individually and watch which physical direction moves.
 
-REUSED CONFIG KEY NAMES ON PURPOSE: steps_per_mm_x/y
+CONFIG KEYS: deg_per_mm_x/y (NOT steps_per_mm_x/y)
 ------------------------------------------------------
-Despite this controller's native unit being DEGREES, not motor steps,
-this driver deliberately reads/writes the SAME config keys
-(motion.steps_per_mm_x / motion.steps_per_mm_y) that
-real_newport_motion.py uses for its steps-per-mm ratio, rather than
-introducing e.g. deg_per_mm_x/y. That's because gui/calibration_panel.py
-and scan/calibrate_scan_area.py (calibrate_steps_per_mm(),
-recommend_home_steps(), the config-patching in
-calibrate_scan_area.py's write_results()) hardcode those exact key
-names and are otherwise fully unit-agnostic — they only ever do
-"native_units = mm * steps_per_mm" arithmetic, never touch a motor
-directly. Renaming the key would silently break the existing
-calibration workflow (Calibrate tab, calibrate_scan_area.py CLI) for
-this controller with no error, just wrong numbers. So: here,
-steps_per_mm_x/y are really "degrees per mm at the plasma surface",
-but the name in config.yaml stays steps_per_mm_x/y so the same
-calibration tools work unmodified. See _eff_deg_per_mm_x/y below.
+This controller's native unit is DEGREES, not motor steps, so it reads
+its own dedicated config keys (motion.deg_per_mm_x / motion.deg_per_mm_y)
+rather than reusing real_newport_motion.py's steps_per_mm_x/y — that
+reuse was tried early on and abandoned (2026-08) once it became clear
+"steps_per_mm" meaning "degrees per mm" was actively misleading and
+made the calibration workflow harder to reason about, not easier. The
+Calibrate tab (gui/calibration_panel.py) and CLI
+(scan/calibrate_scan_area.py) now calibrate this value directly:
+jog in raw degrees to find the wafer edges (see calibration_jog_deg()/
+get_position_deg() below, which deliberately bypass deg_per_mm_x/y
+entirely — no chicken-and-egg guess needed to move safely), then
+divide the measured degree separation between edges by a known real
+distance (wafer diameter, or a caliper measurement) to get
+deg_per_mm_x/y directly — no assumed prior ratio, no "steps taken"
+intermediate. See _eff_deg_per_mm_x/y below.
 
-home_steps / home_velocity / home_timeout_s are 8742-specific (govern
-driving into a mechanical hard stop) and are IGNORED by this driver —
-harmless if still present in config.yaml, just unused.
+home_steps / home_velocity / home_timeout_s / move_velocity are
+8742-specific (motor pulse rates, driving into a mechanical hard stop)
+and are IGNORED by this driver — harmless if still present in
+config.yaml, just unused. There is no equivalent CONEX concept; don't
+add them back for this controller.
 
 HOMING / ORIGIN
 ----------------
@@ -135,12 +136,14 @@ Config keys (under motion:)
   axis_x: "U"                # which CONEX axis letter ('U' or 'V') drives
   axis_y: "V"                # scan-grid X / Y -- CONFIRM by jogging, don't
                               # assume U=X.
-  steps_per_mm_x: 500         # really "deg per mm" -- see module docstring.
-  steps_per_mm_y: 500         # CALIBRATE ON-SITE (same workflow as before).
+  deg_per_mm_x: 0.05          # degrees of mirror tilt per mm at the wafer --
+  deg_per_mm_y: 0.05          # CALIBRATE ON-SITE. See calibration_jog_deg()/
+                              # get_position_deg() below and the Calibrate
+                              # tab's degree-first workflow.
   invert_x: false
   invert_y: false             # same wiring/orientation-fact flag as the 8742
                                # driver, same reasoning for keeping it
-                               # separate from steps_per_mm's own sign.
+                               # separate from deg_per_mm's own sign.
   hard_home: false            # see HOMING / ORIGIN above.
   move_timeout_s: 30          # per-axis move timeout (settle poll)
   stop_confirm_timeout_s: 10  # how long to wait for an explicit ST to land
@@ -203,7 +206,14 @@ _TERMINATOR = "\r\n"
 _DEFAULT_CONTROLLER_ADDRESS = 1
 _DEFAULT_AXIS_X = "U"
 _DEFAULT_AXIS_Y = "V"
-_DEFAULT_STEPS_PER_MM = 500        # placeholder -- MUST calibrate on-site (deg/mm)
+_DEFAULT_DEG_PER_MM = 0.05         # placeholder -- MUST calibrate on-site.
+                                    # ~0.05 deg/mm corresponds to a ~570mm
+                                    # mirror-to-wafer throw (deg_per_mm =
+                                    # 90/(pi*throw_mm)) -- a plausible
+                                    # benchtop order of magnitude, unlike
+                                    # the old reused steps_per_mm placeholder
+                                    # (500), which was off by ~4 orders of
+                                    # magnitude for this controller.
 _DEFAULT_HARD_HOME = False
 _DEFAULT_MOVE_TIMEOUT = 30.0
 _DEFAULT_STOP_CONFIRM_TIMEOUT = 10.0
@@ -389,8 +399,8 @@ class ConexAGAPController(MotionController):
     feedback) over a USB virtual COM port.
 
     Position is read live from hardware in degrees (TP[a]) and
-    converted to/from mm using steps_per_mm_x / steps_per_mm_y (really
-    deg/mm here -- see module docstring).
+    converted to/from mm using deg_per_mm_x / deg_per_mm_y (see module
+    docstring).
 
     Thread safety: NOT thread-safe (scan loop is single-threaded), same
     as NewportPicomotorController.
@@ -422,15 +432,20 @@ class ConexAGAPController(MotionController):
                 f"axes, both are {self._axis_x!r}."
             )
 
-        # Really deg/mm -- kept under the steps_per_mm_x/y config key names
-        # for calibration-tool compatibility. See module docstring.
-        self._steps_per_mm_x = float(motion_cfg.get("steps_per_mm_x", _DEFAULT_STEPS_PER_MM))
-        self._steps_per_mm_y = float(motion_cfg.get("steps_per_mm_y", _DEFAULT_STEPS_PER_MM))
+        # Degrees of mirror tilt per mm of spot travel at the wafer -- this
+        # controller's own dedicated config keys, not reused from the 8742
+        # driver's steps_per_mm_x/y. See module docstring's CONFIG KEYS
+        # section for why, and calibration_jog_deg()/get_position_deg()
+        # below for how this gets calibrated without already knowing it.
+        self._deg_per_mm_x = float(motion_cfg.get("deg_per_mm_x", _DEFAULT_DEG_PER_MM))
+        self._deg_per_mm_y = float(motion_cfg.get("deg_per_mm_y", _DEFAULT_DEG_PER_MM))
 
         self._invert_x = bool(motion_cfg.get("invert_x", False))
         self._invert_y = bool(motion_cfg.get("invert_y", False))
-        self._eff_deg_per_mm_x = self._steps_per_mm_x * (-1.0 if self._invert_x else 1.0)
-        self._eff_deg_per_mm_y = self._steps_per_mm_y * (-1.0 if self._invert_y else 1.0)
+        self._sign_x = -1.0 if self._invert_x else 1.0
+        self._sign_y = -1.0 if self._invert_y else 1.0
+        self._eff_deg_per_mm_x = self._deg_per_mm_x * self._sign_x
+        self._eff_deg_per_mm_y = self._deg_per_mm_y * self._sign_y
 
         self._hard_home = bool(motion_cfg.get("hard_home", _DEFAULT_HARD_HOME))
         # Two independent fail-closed interlocks.  motion_enabled is the
@@ -459,17 +474,19 @@ class ConexAGAPController(MotionController):
         self._origin_u = 0.0
         self._origin_v = 0.0
 
-        if self._steps_per_mm_x == _DEFAULT_STEPS_PER_MM:
+        if self._deg_per_mm_x == _DEFAULT_DEG_PER_MM:
             logger.warning(
-                "steps_per_mm_x (deg/mm) is using the default placeholder "
-                "value (%g). Calibrate on-site and update config.yaml.",
-                _DEFAULT_STEPS_PER_MM,
+                "deg_per_mm_x is using the default placeholder value (%g). "
+                "Calibrate on-site (Calibrate tab / calibrate_scan_area.py) "
+                "and update config.yaml.",
+                _DEFAULT_DEG_PER_MM,
             )
-        if self._steps_per_mm_y == _DEFAULT_STEPS_PER_MM:
+        if self._deg_per_mm_y == _DEFAULT_DEG_PER_MM:
             logger.warning(
-                "steps_per_mm_y (deg/mm) is using the default placeholder "
-                "value (%g). Calibrate on-site and update config.yaml.",
-                _DEFAULT_STEPS_PER_MM,
+                "deg_per_mm_y is using the default placeholder value (%g). "
+                "Calibrate on-site (Calibrate tab / calibrate_scan_area.py) "
+                "and update config.yaml.",
+                _DEFAULT_DEG_PER_MM,
             )
 
         logger.info(
@@ -634,17 +651,18 @@ class ConexAGAPController(MotionController):
         """
         Absolute move to (x_mm, y_mm) in scan-grid coordinates.
 
-        Converts mm -> degrees using steps_per_mm_x/_y (and invert_x/
+        Converts mm -> degrees using deg_per_mm_x/_y (and invert_x/
         invert_y), offsets by the homed origin, and issues both axis
         PA commands. Returns immediately; call wait_for_settle() to
         block.
 
         Requires motion.calibration_confirmed -- this is the path
-        scan_manager.py uses for real scan points, and steps_per_mm_x/y
-        must be real measured CONEX deg/mm by the time anything moves
-        this way. See calibration_jog() for the jog used to MEASURE
-        those numbers in the first place, before they can honestly be
-        confirmed.
+        scan_manager.py uses for real scan points, and deg_per_mm_x/y
+        must be real measured values by the time anything moves this
+        way. See calibration_jog_deg() for how those numbers get
+        MEASURED in the first place, before they can honestly be
+        confirmed -- it deliberately never goes through this mm
+        conversion at all.
         """
         if not self._homed:
             raise RuntimeError("Must call home() before move_to().")
@@ -653,24 +671,80 @@ class ConexAGAPController(MotionController):
     def calibration_jog(self, dx_mm: float = 0.0, dy_mm: float = 0.0):
         """
         Relative move by (dx_mm, dy_mm), for use ONLY by the interactive
-        calibration workflow (calibrate_scan_area.py / gui/calibration_panel.py).
+        calibration workflow (calibrate_scan_area.py / gui/calibration_panel.py),
+        and only once deg_per_mm_x/y are already at least roughly known.
 
         Overrides MotionController.calibration_jog() -- see its docstring
         for the full chicken-and-egg rationale. This still requires
         motion.motion_enabled and still validates the computed target
         against the controller's live SL/SR limits (via _move_to_impl,
         the same code path move_to() uses); it just passes
-        require_calibration=False, since the wafer-edge jog loop this
-        feeds is exactly how motion.calibration_confirmed's inputs
-        (steps_per_mm_x/y, i.e. deg/mm) get measured, and move_to()'s
-        ordinary calibration_confirmed gate would otherwise block the
-        only workflow that can honestly satisfy it.
+        require_calibration=False, since move_to()'s ordinary
+        calibration_confirmed gate would otherwise block the only
+        workflow that can honestly satisfy it.
+
+        Prefer calibration_jog_deg() for the FIRST calibration on a new
+        setup, where deg_per_mm_x/y aren't known yet at all -- this mm
+        version still multiplies by whatever deg_per_mm_x/y currently
+        is (even a placeholder), so an unknown/wrong value here can
+        still compute a wildly out-of-range target the same way move_to()
+        can. calibration_jog_deg() sidesteps that entirely by never
+        touching deg_per_mm_x/y.
         """
         if not self._homed:
             raise RuntimeError("Must call home() before calibration_jog().")
         x, y = self.get_position()
         self._move_to_impl(x + dx_mm, y + dy_mm, require_calibration=False)
         self.wait_for_settle(0.0)
+
+    def calibration_jog_deg(self, dx_deg: float = 0.0, dy_deg: float = 0.0):
+        """
+        Relative move by (dx_deg, dy_deg) in scan-grid-semantic degrees --
+        i.e. respects axis_x/axis_y (which CONEX letter is "X"/"Y") and
+        invert_x/invert_y (sign convention), exactly like calibration_jog()
+        does for mm, but the magnitude is native degrees and NEVER passes
+        through deg_per_mm_x/y at all.
+
+        This is the safe way to run a calibration on a setup where
+        deg_per_mm_x/y aren't known yet (a fresh install, or a mount
+        that's been physically moved) -- see get_position_deg() and the
+        module docstring's CONFIG KEYS section. Same guards as
+        calibration_jog(): requires motion.motion_enabled, never requires
+        motion.calibration_confirmed, and every target is validated
+        against the controller's live SL/SR limits before anything is
+        sent -- a jog specified directly in degrees, bounded by the same
+        ~1 degree range the limits are already expressed in, can't
+        overshoot by 3-5 orders of magnitude the way an unknown mm ratio
+        can.
+        """
+        if not self._homed:
+            raise RuntimeError("Must call home() before calibration_jog_deg().")
+        target_u = self._origin_u + dx_deg * self._sign_x
+        target_v = self._origin_v + dy_deg * self._sign_y
+        self._require_motion_permission("calibration jog (deg)", require_calibration=False)
+        self._assert_current_positions_within_limits("calibration jog (deg)")
+        self._validate_axis_target(self._axis_x, target_u)
+        self._validate_axis_target(self._axis_y, target_v)
+        self._ensure_enabled()
+        self._send(f"{self._address}PA{self._axis_x}{target_u:.6f}")
+        self._send(f"{self._address}PA{self._axis_y}{target_v:.6f}")
+        self._wait_move(label="calibration jog (deg)")
+
+    def get_position_deg(self) -> tuple[float, float]:
+        """
+        Live position in scan-grid-semantic degrees, relative to origin --
+        the same axis_x/axis_y + invert_x/invert_y convention as
+        get_position(), but WITHOUT dividing by deg_per_mm_x/y.
+
+        Use this (and calibration_jog_deg()) for the first calibration
+        pass on a new setup: jog to each wafer edge, read this, and once
+        you also know a true real-world distance (wafer diameter, a
+        caliper measurement), deg_per_mm = degree_separation / true_mm --
+        see scan/calibrate_scan_area.py's calibrate_deg_per_mm().
+        """
+        u = self._get_axis_position(self._axis_x) - self._origin_u
+        v = self._get_axis_position(self._axis_y) - self._origin_v
+        return (u * self._sign_x, v * self._sign_y)
 
     def _move_to_impl(self, x_mm: float, y_mm: float, require_calibration: bool):
         """Shared absolute-move body for move_to() and calibration_jog().
@@ -921,8 +995,9 @@ class ConexAGAPController(MotionController):
         if require_calibration and not self._calibration_confirmed:
             raise MotionFault(
                 f"CONEX {operation} blocked: motion.calibration_confirmed "
-                "is false. Replace the old 8742 steps_per_mm values with "
-                "measured CONEX degrees/mm values before enabling scan moves."
+                "is false. Set deg_per_mm_x/y to measured values (see "
+                "calibration_jog_deg()/get_position_deg()) before enabling "
+                "scan moves."
             )
 
     def _get_state(self) -> str:

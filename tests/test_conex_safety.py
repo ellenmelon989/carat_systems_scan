@@ -83,8 +83,8 @@ def config(**motion_overrides):
         "controller_address": 1,
         "axis_x": "U",
         "axis_y": "V",
-        "steps_per_mm_x": 0.01,
-        "steps_per_mm_y": 0.01,
+        "deg_per_mm_x": 0.01,
+        "deg_per_mm_y": 0.01,
         "motion_enabled": False,
         "calibration_confirmed": False,
         "hard_home": False,
@@ -134,8 +134,8 @@ class ConexSafetyTests(unittest.TestCase):
             fake,
             motion_enabled=True,
             calibration_confirmed=True,
-            steps_per_mm_x=1.0,
-            steps_per_mm_y=0.01,
+            deg_per_mm_x=1.0,
+            deg_per_mm_y=0.01,
         )
         controller.home()
         with self.assertRaisesRegex(MotionFault, "outside stored limits"):
@@ -167,7 +167,7 @@ class ConexSafetyTests(unittest.TestCase):
         # calibration_confirmed is still False here -- would block move_to()
         # (see test_move_requires_confirmed_calibration). calibration_jog()
         # must NOT require it: it's the jog loop that MEASURES
-        # steps_per_mm_x/y in the first place (gui/calibration_panel.py,
+        # deg_per_mm_x/y in the first place (gui/calibration_panel.py,
         # calibrate_scan_area.py), before calibration_confirmed can honestly
         # be set true.
         controller.calibration_jog(dx_mm=10.0, dy_mm=20.0)
@@ -177,12 +177,66 @@ class ConexSafetyTests(unittest.TestCase):
     def test_calibration_jog_still_validates_target_against_live_limits(self):
         fake = FakeConexSerial()
         controller = self.make_controller(
-            fake, motion_enabled=True, steps_per_mm_x=1.0, steps_per_mm_y=0.01
+            fake, motion_enabled=True, deg_per_mm_x=1.0, deg_per_mm_y=0.01
         )
         controller.home()
         with self.assertRaisesRegex(MotionFault, "outside stored limits"):
             controller.calibration_jog(dx_mm=2.0)
         self.assert_no_motion_command(fake)
+
+    def test_calibration_jog_deg_requires_motion_interlock(self):
+        fake = FakeConexSerial()
+        controller = self.make_controller(fake)
+        controller.home()
+        with self.assertRaisesRegex(MotionFault, "motion_enabled"):
+            controller.calibration_jog_deg(dx_deg=0.1)
+        self.assert_no_motion_command(fake)
+
+    def test_calibration_jog_deg_never_touches_deg_per_mm(self):
+        # deg_per_mm_x/y is set to the wildly-wrong old-8742-style value
+        # (28187.6) that motivated this method -- a single mm-based jog at
+        # that ratio would blow past the +/-0.76 deg limit instantly (see
+        # test_calibration_jog_still_validates_target_against_live_limits'
+        # cousin for the mm case). calibration_jog_deg() must be completely
+        # unaffected by it: the degrees given are sent as-is.
+        fake = FakeConexSerial()
+        controller = self.make_controller(
+            fake, motion_enabled=True, deg_per_mm_x=28187.6, deg_per_mm_y=28187.6
+        )
+        controller.home()
+        controller.calibration_jog_deg(dx_deg=0.2, dy_deg=-0.3)
+        self.assertIn("1PAU0.200000", fake.commands)
+        self.assertIn("1PAV-0.300000", fake.commands)
+
+    def test_calibration_jog_deg_does_not_require_confirmed_calibration(self):
+        fake = FakeConexSerial()
+        controller = self.make_controller(fake, motion_enabled=True)
+        controller.home()
+        controller.calibration_jog_deg(dx_deg=0.1)
+        self.assertIn("1PAU0.100000", fake.commands)
+
+    def test_calibration_jog_deg_still_validates_against_live_limits(self):
+        fake = FakeConexSerial()
+        controller = self.make_controller(fake, motion_enabled=True)
+        controller.home()
+        with self.assertRaisesRegex(MotionFault, "outside stored limits"):
+            controller.calibration_jog_deg(dx_deg=5.0)
+        self.assert_no_motion_command(fake)
+
+    def test_get_position_deg_applies_axis_mapping_and_invert_not_ratio(self):
+        # invert_y=True, and a deg_per_mm_y that would badly distort an mm
+        # reading if get_position_deg() divided by it -- it must not.
+        fake = FakeConexSerial(position_u=0.3, position_v=-0.2)
+        controller = self.make_controller(
+            fake, motion_enabled=True, invert_y=True, deg_per_mm_y=99.0
+        )
+        controller.home()  # soft home: origin = current live position = (0.3, -0.2)
+        fake.position_u = 0.35
+        fake.position_v = -0.25
+        x_deg, y_deg = controller.get_position_deg()
+        self.assertAlmostEqual(x_deg, 0.05)
+        # v moved -0.05 from origin; invert_y flips the sign.
+        self.assertAlmostEqual(y_deg, 0.05)
 
     def test_raw_axis_jog_uses_live_position_not_stale_relative_target(self):
         fake = FakeConexSerial(position_u=0.2)

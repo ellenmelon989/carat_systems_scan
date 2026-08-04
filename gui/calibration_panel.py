@@ -3,15 +3,15 @@ gui/calibration_panel.py
 
 GUI wizard for scanner-area calibration -- the on-screen equivalent of
 calibrate_scan_area.py's CLI workflow. See that module's docstring for
-the full rationale behind each step (fiducial homing instead of a
-hard-stop home(), the clearance check, per-jog checkpoints, the
-circular wafer mask, etc.) -- this module re-implements only the
-JOGGING and CONFIRMATION steps as Tk widgets/dialogs in place of
-input()/msvcrt. It reuses calibrate_scan_area.py's pure geometry and
-config-writing functions (compute_area, rescale_edges,
-compute_radius_mm, recommend_home_steps, write_results) so the math and
-the config.yaml patching stay byte-for-byte identical between the CLI
-tool and this tab -- the same "preview and execution must derive from
+the full rationale behind each step (degree-first jogging, fiducial
+homing instead of a hard-stop home(), the clearance check, per-jog
+checkpoints, the circular wafer mask, etc.) -- this module re-implements
+only the JOGGING and CONFIRMATION steps as Tk widgets/dialogs in place
+of input()/msvcrt. It reuses calibrate_scan_area.py's pure geometry and
+config-writing functions (compute_area, calibrate_deg_per_mm,
+edges_deg_to_mm, compute_radius_mm, write_results) so the math and the
+config.yaml patching stay byte-for-byte identical between the CLI tool
+and this tab -- the same "preview and execution must derive from
 identical logic" principle CONFIG_RANGE_DECIMALS and generate_grid's
 mask already enforce elsewhere in this codebase (see scan_params.py
 and calibrate_scan_area.py's module docstrings).
@@ -36,21 +36,21 @@ import yaml
 from motion.motion_controller import AxisStateUnknown, MotionFault, get_motion_controller
 import scan.scan_params as scan_params
 from scan.calibrate_scan_area import (
-    CLEARANCE_CHECK_STEP_MM,
+    CLEARANCE_CHECK_STEP_DEG,
     CONFIG_RANGE_DECIMALS,
     EDGE_ORDER,
     EDGE_PROMPTS,
-    JOG_CHECKPOINT_INTERVAL_DEFAULT_MM,
-    JOG_CHECKPOINT_INTERVAL_MAX_MM,
-    JOG_CHECKPOINT_INTERVAL_MIN_MM,
-    JOG_STEP_DEFAULT_MM,
-    JOG_STEP_MAX_MM,
-    JOG_STEP_MIN_MM,
+    JOG_CHECKPOINT_INTERVAL_DEFAULT_DEG,
+    JOG_CHECKPOINT_INTERVAL_MAX_DEG,
+    JOG_CHECKPOINT_INTERVAL_MIN_DEG,
+    JOG_STEP_DEFAULT_DEG,
+    JOG_STEP_MAX_DEG,
+    JOG_STEP_MIN_DEG,
+    calibrate_deg_per_mm,
     compute_area,
     compute_radius_mm,
-    recommend_home_steps,
-    rescale_edges,
-    validate_jog_checkpoint_interval_mm,
+    edges_deg_to_mm,
+    validate_jog_checkpoint_interval_deg,
     write_results,
 )
 from scan.scan_manager import generate_grid
@@ -69,7 +69,7 @@ class CalibrationPanel(ttk.Frame):
     """
     config: the App's live config dict -- read (not mutated) for
         motion connection settings and the current (possibly
-        placeholder) steps_per_mm. Calibration results only ever reach
+        placeholder) deg_per_mm_x/y. Calibration results only ever reach
         the rest of the app through on_calibrated(), never by silently
         editing this dict in place.
     config_path: path to the config.yaml this will patch (same file
@@ -92,18 +92,18 @@ class CalibrationPanel(ttk.Frame):
 
         self.motion = None
         self.jog_enabled = False
-        self.jog_step_mm = JOG_STEP_DEFAULT_MM
-        self.checkpoint_interval_mm = JOG_CHECKPOINT_INTERVAL_DEFAULT_MM
+        self.jog_step_deg = JOG_STEP_DEFAULT_DEG
+        self.checkpoint_interval_deg = JOG_CHECKPOINT_INTERVAL_DEFAULT_DEG
         self._moved_since_checkpoint = 0.0
         self._arrows_bound = False
         self._position_poll_job = None
 
-        self.edges = {}
+        self.edges_deg = {}
         self._edge_idx = 0
-        self.spmm_result = None
+        self.deg_per_mm_result = None
+        self.edges_mm = None
         self.area = None
         self.radius_mm = None
-        self.recommended_home_steps = None
 
         self.step = "idle"
 
@@ -114,8 +114,8 @@ class CalibrationPanel(ttk.Frame):
         self.pos_var = tk.StringVar(value="Position: --")
         ttk.Label(header, textvariable=self.pos_var).grid(row=0, column=0, sticky="w", padx=(0, 16))
 
-        ttk.Label(header, text="Jog step (mm)").grid(row=0, column=1, sticky="w")
-        self.jog_step_var = tk.StringVar(value=f"{JOG_STEP_DEFAULT_MM:.2f}")
+        ttk.Label(header, text="Jog step (deg)").grid(row=0, column=1, sticky="w")
+        self.jog_step_var = tk.StringVar(value=f"{JOG_STEP_DEFAULT_DEG:.3f}")
         jog_entry = ttk.Entry(header, textvariable=self.jog_step_var, width=6)
         jog_entry.grid(row=0, column=2, sticky="w")
         jog_entry.bind("<Return>", self._apply_jog_step_entry)
@@ -163,22 +163,22 @@ class CalibrationPanel(ttk.Frame):
     # ------------------------------------------------------------------
 
     def _halve_jog_step(self):
-        self.jog_step_mm = max(JOG_STEP_MIN_MM, self.jog_step_mm / 2)
-        self.jog_step_var.set(f"{self.jog_step_mm:.2f}")
+        self.jog_step_deg = max(JOG_STEP_MIN_DEG, self.jog_step_deg / 2)
+        self.jog_step_var.set(f"{self.jog_step_deg:.3f}")
 
     def _double_jog_step(self):
-        self.jog_step_mm = min(JOG_STEP_MAX_MM, self.jog_step_mm * 2)
-        self.jog_step_var.set(f"{self.jog_step_mm:.2f}")
+        self.jog_step_deg = min(JOG_STEP_MAX_DEG, self.jog_step_deg * 2)
+        self.jog_step_var.set(f"{self.jog_step_deg:.3f}")
 
     def _apply_jog_step_entry(self, event=None):
         try:
             value = float(self.jog_step_var.get())
         except ValueError:
-            self.jog_step_var.set(f"{self.jog_step_mm:.2f}")
+            self.jog_step_var.set(f"{self.jog_step_deg:.3f}")
             return
-        value = max(JOG_STEP_MIN_MM, min(JOG_STEP_MAX_MM, value))
-        self.jog_step_mm = value
-        self.jog_step_var.set(f"{value:.2f}")
+        value = max(JOG_STEP_MIN_DEG, min(JOG_STEP_MAX_DEG, value))
+        self.jog_step_deg = value
+        self.jog_step_var.set(f"{value:.3f}")
 
     # ------------------------------------------------------------------
     # Jogging (buttons + arrow keys), position polling, checkpoints
@@ -224,13 +224,13 @@ class CalibrationPanel(ttk.Frame):
     def _do_jog(self, dx_sign, dy_sign):
         if not self.jog_enabled or self.motion is None:
             return
-        dx = dx_sign * self.jog_step_mm
-        dy = dy_sign * self.jog_step_mm
+        dx = dx_sign * self.jog_step_deg
+        dy = dy_sign * self.jog_step_deg
 
-        # self.motion.calibration_jog() previously had NO error handling here: a
-        # MotionFault/AxisStateUnknown raised out of it (e.g. an axis that
-        # didn't stop within move_timeout_s) propagated straight out of
-        # this Tk callback, where Tk's default handler just prints
+        # self.motion.calibration_jog_deg() previously had NO error handling
+        # here: a MotionFault/AxisStateUnknown raised out of it (e.g. an
+        # axis that didn't stop within move_timeout_s) propagated straight
+        # out of this Tk callback, where Tk's default handler just prints
         # "Exception in Tkinter callback" to the console and swallows it.
         # The operator saw nothing on screen, jog stayed enabled, and
         # holding an arrow key could re-trigger the same fault repeatedly
@@ -242,7 +242,7 @@ class CalibrationPanel(ttk.Frame):
         # axis_fault status already treat hardware faults as something the
         # operator must be told about, not something to fail silently.
         try:
-            self.motion.calibration_jog(dx_mm=dx, dy_mm=dy)
+            self.motion.calibration_jog_deg(dx_deg=dx, dy_deg=dy)
         except AxisStateUnknown as exc:
             # Real state unknown -- MUST NOT jog again without a manual
             # check (see that exception's own docstring). _abort() is the
@@ -257,18 +257,17 @@ class CalibrationPanel(ttk.Frame):
             # Axis timed out but the follow-up stop() was confirmed -- the
             # hardware is idle and it's technically safe to jog again, but
             # the operator still needs to know a jog just silently failed
-            # (typically means the mount hit a mechanical limit or a
-            # steps_per_mm miscalibration turned a small jog into a much
-            # larger commanded move than intended). Log + surface it, but
-            # don't force a full abort/reset the way AxisStateUnknown does.
+            # (typically means the mount hit its SL/SR limit -- jogging in
+            # degrees, this can only mean the mirror is genuinely near the
+            # edge of its ~1 degree travel, not a bad conversion ratio).
+            # Log + surface it, but don't force a full abort/reset the way
+            # AxisStateUnknown does.
             self._log(f"JOG FAULT (axis confirmed stopped): {exc}")
             messagebox.showwarning(
                 "Jog fault",
                 f"{exc}\n\nThe axis is confirmed stopped and safe to jog "
-                "again, but check that the mount didn't hit a mechanical "
-                "limit, and that steps_per_mm is actually calibrated for "
-                "this hardware (still the uncalibrated default until "
-                "Apply is used on the steps_per_mm step).",
+                "again, but this means the mirror is near the edge of its "
+                "travel -- jog the other way, or check the hardware.",
             )
             self._refresh_position()
             return
@@ -276,28 +275,28 @@ class CalibrationPanel(ttk.Frame):
         self._moved_since_checkpoint += abs(dx) + abs(dy)
         self._refresh_position()
 
-        if self._moved_since_checkpoint >= self.checkpoint_interval_mm:
+        if self._moved_since_checkpoint >= self.checkpoint_interval_deg:
             moved = self._moved_since_checkpoint
             self._moved_since_checkpoint = 0.0
             if not messagebox.askyesno(
                 "Jog checkpoint",
-                f"Moved ~{moved:.1f}mm since the last check — still tracking "
+                f"Moved ~{moved:.2f} deg since the last check — still tracking "
                 "real motion on the mirror?",
             ):
                 self._abort(
-                    "Jog checkpoint not confirmed — the stage may have run "
-                    "into a hard limit partway through this move and could "
-                    "now be silently miscounting position. Stopping rather "
-                    "than continuing to jog on an axis that may be stalled; "
-                    "check the hardware before re-running."
+                    "Jog checkpoint not confirmed — the commanded motion "
+                    "isn't visibly reaching the wafer. Stopping rather than "
+                    "continuing to jog blind; check the optical path (aim "
+                    "light, blocked beam, wrong axis/mirror) before "
+                    "re-running."
                 )
 
     def _refresh_position(self):
         if self.motion is None:
             self.pos_var.set("Position: --")
             return
-        x, y = self.motion.get_position()
-        self.pos_var.set(f"Position: {x:.3f}, {y:.3f} mm")
+        x, y = self.motion.get_position_deg()
+        self.pos_var.set(f"Position: {x:.4f}, {y:.4f} deg")
 
     def _start_position_poll(self):
         if self._position_poll_job is not None:
@@ -322,11 +321,11 @@ class CalibrationPanel(ttk.Frame):
         self.step = "idle"
         self._clear_step_frame()
         ttk.Label(self.step_frame, text=(
-            "Jog checkpoint interval (mm) — how far to jog before "
-            f"re-confirming real motion [{JOG_CHECKPOINT_INTERVAL_MIN_MM}-"
-            f"{JOG_CHECKPOINT_INTERVAL_MAX_MM}]"
+            "Jog checkpoint interval (deg) — how far to jog before "
+            f"re-confirming real motion [{JOG_CHECKPOINT_INTERVAL_MIN_DEG}-"
+            f"{JOG_CHECKPOINT_INTERVAL_MAX_DEG}]"
         ), wraplength=460, justify="left").grid(row=0, column=0, columnspan=2, sticky="w")
-        self.checkpoint_var = tk.StringVar(value=str(JOG_CHECKPOINT_INTERVAL_DEFAULT_MM))
+        self.checkpoint_var = tk.StringVar(value=str(JOG_CHECKPOINT_INTERVAL_DEFAULT_DEG))
         ttk.Entry(self.step_frame, textvariable=self.checkpoint_var, width=10).grid(
             row=1, column=0, sticky="w")
         ttk.Button(self.step_frame, text="Start Calibration", command=self._start_calibration).grid(
@@ -343,11 +342,11 @@ class CalibrationPanel(ttk.Frame):
             return
 
         try:
-            checkpoint_interval = validate_jog_checkpoint_interval_mm(self.checkpoint_var.get())
+            checkpoint_interval = validate_jog_checkpoint_interval_deg(self.checkpoint_var.get())
         except (ValueError, TypeError) as exc:
             messagebox.showerror("Invalid checkpoint interval", str(exc))
             return
-        self.checkpoint_interval_mm = checkpoint_interval
+        self.checkpoint_interval_deg = checkpoint_interval
 
         try:
             self.motion = get_motion_controller(self.config)
@@ -355,8 +354,8 @@ class CalibrationPanel(ttk.Frame):
             messagebox.showerror("Motion connection failed", str(exc))
             return
 
-        # Provisional zero -- move_to()/jog() refuse to move at all until
-        # _homed is True, so this just permits the clearance check and
+        # Provisional zero -- calibration_jog_deg() refuses to move at all
+        # until _homed is True, so this just permits the clearance check and
         # reference-mark jog below. Re-zeroed for real once the operator
         # confirms the actual reference mark (see _confirm_reference).
         self.motion.zero_here()
@@ -365,27 +364,28 @@ class CalibrationPanel(ttk.Frame):
         if not self._run_clearance_check():
             return
 
-        self.edges = {}
+        self.edges_deg = {}
         self._moved_since_checkpoint = 0.0
         self._render_reference()
 
     def _run_clearance_check(self):
         directions = [
-            ("RIGHT (+X)", CLEARANCE_CHECK_STEP_MM, 0.0),
-            ("LEFT (-X)", -CLEARANCE_CHECK_STEP_MM, 0.0),
-            ("UP (+Y)", 0.0, CLEARANCE_CHECK_STEP_MM),
-            ("DOWN (-Y)", 0.0, -CLEARANCE_CHECK_STEP_MM),
+            ("RIGHT (+X)", CLEARANCE_CHECK_STEP_DEG, 0.0),
+            ("LEFT (-X)", -CLEARANCE_CHECK_STEP_DEG, 0.0),
+            ("UP (+Y)", 0.0, CLEARANCE_CHECK_STEP_DEG),
+            ("DOWN (-Y)", 0.0, -CLEARANCE_CHECK_STEP_DEG),
         ]
         self._log("Running clearance check (small test jog in each direction)...")
         for label, dx, dy in directions:
-            self.motion.calibration_jog(dx_mm=dx, dy_mm=dy)
+            self.motion.calibration_jog_deg(dx_deg=dx, dy_deg=dy)
             self._refresh_position()
             if not messagebox.askyesno("Clearance check", f"Jogged {label}. Did the spot visibly move?"):
                 self._abort(
-                    f"No visible motion jogging {label} — the stage may already be "
-                    "at a hard limit in this direction. Stopping here rather than "
-                    "issuing further moves onto an axis in this state; check the "
-                    "hardware before re-running."
+                    f"No visible motion jogging {label} — check the optical "
+                    "path (aim light, blocked beam) and axis_x/axis_y mapping "
+                    "before re-running. Stopping here rather than continuing "
+                    "to jog on an axis that isn't visibly doing what's "
+                    "commanded."
                 )
                 return False
         self._log("Clearance confirmed in all 4 directions.")
@@ -405,9 +405,9 @@ class CalibrationPanel(ttk.Frame):
         self._set_jog_enabled(True)
 
     def _confirm_reference(self):
-        x, y = self.motion.get_position()
+        x, y = self.motion.get_position_deg()
         self.motion.zero_here()
-        self._log(f"Origin zeroed at reference mark (was at {x:.3f}, {y:.3f} mm "
+        self._log(f"Origin zeroed at reference mark (was at {x:.4f}, {y:.4f} deg "
                   "in the provisional frame).")
         self._moved_since_checkpoint = 0.0
         self._edge_idx = 0
@@ -434,40 +434,43 @@ class CalibrationPanel(ttk.Frame):
 
     def _confirm_edge(self):
         edge_name = EDGE_ORDER[self._edge_idx]
-        x, y = self.motion.get_position()
-        self.edges[edge_name] = (x, y)
-        self._log(f"Recorded {edge_name} edge at ({x:.3f}, {y:.3f}) mm")
+        x, y = self.motion.get_position_deg()
+        self.edges_deg[edge_name] = (x, y)
+        self._log(f"Recorded {edge_name} edge at ({x:.4f}, {y:.4f}) deg")
         self._edge_idx += 1
         if self._edge_idx < len(EDGE_ORDER):
             self._render_edge()
         else:
             self._set_jog_enabled(False)
-            self._render_steps_per_mm()
+            self._render_deg_per_mm()
 
     # ------------------------------------------------------------------
-    # Step: optional steps_per_mm recalibration
+    # Step: deg/mm calibration
     # ------------------------------------------------------------------
 
-    def _render_steps_per_mm(self):
-        self.step = "steps_per_mm"
+    def _render_deg_per_mm(self):
+        self.step = "deg_per_mm"
         self._clear_step_frame()
 
-        old_spmm_x = float(self.config["motion"]["steps_per_mm_x"])
-        old_spmm_y = float(self.config["motion"]["steps_per_mm_y"])
-        x_left, _ = self.edges["left"]
-        x_right, _ = self.edges["right"]
-        _, y_top = self.edges["top"]
-        _, y_bottom = self.edges["bottom"]
-        self._steps_lr = abs(x_right - x_left) * old_spmm_x
-        self._steps_bt = abs(y_top - y_bottom) * old_spmm_y
+        x_left, _ = self.edges_deg["left"]
+        x_right, _ = self.edges_deg["right"]
+        _, y_top = self.edges_deg["top"]
+        _, y_bottom = self.edges_deg["bottom"]
+        self._deg_lr = abs(x_right - x_left)
+        self._deg_bt = abs(y_top - y_bottom)
+
+        current_x = self.config["motion"].get("deg_per_mm_x")
+        current_y = self.config["motion"].get("deg_per_mm_y")
 
         ttk.Label(self.step_frame, text=(
-            "Optional: re-derive steps_per_mm from these same 4 edges "
-            "(one sample from your jog, not an averaged measurement — "
-            "good for a quick pass, not final precision).\n"
-            f"Left-right jog used {self._steps_lr:.0f} motor steps (X).\n"
-            f"Bottom-top jog used {self._steps_bt:.0f} motor steps (Y).\n"
-            "Leave both blank and click Skip if steps_per_mm is already calibrated."
+            "Enter a TRUE real-world distance for each (e.g. wafer diameter, "
+            "or a caliper measurement) to compute deg_per_mm directly from "
+            "this session's edges (one sample from your jog, not an averaged "
+            "measurement — good for a quick pass, not final precision).\n"
+            f"Left-right jog spanned {self._deg_lr:.4f} deg (X).\n"
+            f"Bottom-top jog spanned {self._deg_bt:.4f} deg (Y).\n"
+            f"Leave both blank and click Skip to reuse the current config "
+            f"value instead (X={current_x}, Y={current_y})."
         ), wraplength=460, justify="left").grid(row=0, column=0, columnspan=2, sticky="w")
 
         ttk.Label(self.step_frame, text="True left-right distance (mm)").grid(row=1, column=0, sticky="w")
@@ -478,12 +481,12 @@ class CalibrationPanel(ttk.Frame):
         self.true_y_var = tk.StringVar()
         ttk.Entry(self.step_frame, textvariable=self.true_y_var, width=10).grid(row=2, column=1, sticky="w")
 
-        ttk.Button(self.step_frame, text="Apply", command=self._apply_steps_per_mm).grid(
+        ttk.Button(self.step_frame, text="Apply", command=self._apply_deg_per_mm).grid(
             row=3, column=0, pady=(8, 0), sticky="w")
-        ttk.Button(self.step_frame, text="Skip", command=self._skip_steps_per_mm).grid(
+        ttk.Button(self.step_frame, text="Skip", command=self._skip_deg_per_mm).grid(
             row=3, column=1, pady=(8, 0), sticky="w")
 
-    def _apply_steps_per_mm(self):
+    def _apply_deg_per_mm(self):
         x_raw = self.true_x_var.get().strip()
         y_raw = self.true_y_var.get().strip()
         if not x_raw or not y_raw:
@@ -495,28 +498,52 @@ class CalibrationPanel(ttk.Frame):
         except ValueError:
             messagebox.showerror("Invalid values", "Enter numeric distances in mm.")
             return
+        if true_x_mm <= 0 or true_y_mm <= 0:
+            messagebox.showerror("Invalid values", "Distances must be positive.")
+            return
 
-        old_spmm_x = float(self.config["motion"]["steps_per_mm_x"])
-        old_spmm_y = float(self.config["motion"]["steps_per_mm_y"])
-        new_spmm_x = self._steps_lr / true_x_mm
-        new_spmm_y = self._steps_bt / true_y_mm
+        current_x = self.config["motion"].get("deg_per_mm_x")
+        current_y = self.config["motion"].get("deg_per_mm_y")
+        new_deg_per_mm_x = self._deg_lr / true_x_mm
+        new_deg_per_mm_y = self._deg_bt / true_y_mm
 
-        self.spmm_result = {
-            "steps_per_mm_x": new_spmm_x,
-            "steps_per_mm_y": new_spmm_y,
-            "old_steps_per_mm_x": old_spmm_x,
-            "old_steps_per_mm_y": old_spmm_y,
+        self.deg_per_mm_result = {
+            "deg_per_mm_x": new_deg_per_mm_x,
+            "deg_per_mm_y": new_deg_per_mm_y,
+            # Kept (not just consumed here) so compute_radius_mm() can use
+            # them as an independent, operator-supplied wafer size.
             "true_x_mm": true_x_mm,
             "true_y_mm": true_y_mm,
+            "recalibrated": True,
         }
-        self._log(f"steps_per_mm_x: {old_spmm_x:.2f} -> {new_spmm_x:.2f}")
-        self._log(f"steps_per_mm_y: {old_spmm_y:.2f} -> {new_spmm_y:.2f}")
+        self._log(f"deg_per_mm_x: {current_x} -> {new_deg_per_mm_x:.4f}")
+        self._log(f"deg_per_mm_y: {current_y} -> {new_deg_per_mm_y:.4f}")
 
-        self.edges = rescale_edges(self.edges, self.spmm_result)
+        self.edges_mm = edges_deg_to_mm(self.edges_deg, new_deg_per_mm_x, new_deg_per_mm_y)
         self._render_params()
 
-    def _skip_steps_per_mm(self):
-        self.spmm_result = None
+    def _skip_deg_per_mm(self):
+        current_x = self.config["motion"].get("deg_per_mm_x")
+        current_y = self.config["motion"].get("deg_per_mm_y")
+        if not current_x or not current_y:
+            messagebox.showerror(
+                "No existing deg_per_mm",
+                "config.yaml has no existing deg_per_mm_x/y to fall back to "
+                "— enter a real distance for at least the first calibration "
+                "on a new/moved setup.",
+            )
+            return
+        self.deg_per_mm_result = {
+            "deg_per_mm_x": float(current_x),
+            "deg_per_mm_y": float(current_y),
+            "recalibrated": False,
+        }
+        self._log("Skipped — reusing current config deg_per_mm_x/y.")
+        self.edges_mm = edges_deg_to_mm(
+            self.edges_deg,
+            self.deg_per_mm_result["deg_per_mm_x"],
+            self.deg_per_mm_result["deg_per_mm_y"],
+        )
         self._render_params()
 
     # ------------------------------------------------------------------
@@ -558,7 +585,7 @@ class CalibrationPanel(ttk.Frame):
             messagebox.showerror("Invalid scan parameters", str(exc))
             return
 
-        area = compute_area(self.edges)
+        area = compute_area(self.edges_mm)
         # Round once, here, to the exact precision write_results() persists --
         # see calibrate_scan_area.CONFIG_RANGE_DECIMALS for why this must
         # happen before the preview, not just at write time.
@@ -567,7 +594,7 @@ class CalibrationPanel(ttk.Frame):
             "y_range_mm": [round(v, CONFIG_RANGE_DECIMALS) for v in area["y_range_mm"]],
             "wafer_center_mm": [round(v, CONFIG_RANGE_DECIMALS) for v in area["wafer_center_mm"]],
         }
-        radius_mm = compute_radius_mm(area, self.spmm_result)
+        radius_mm = compute_radius_mm(area, self.deg_per_mm_result)
 
         nx, ny = scan_params.grid_dims_from_range(area["x_range_mm"], area["y_range_mm"], step_size_mm)
 
@@ -593,9 +620,6 @@ class CalibrationPanel(ttk.Frame):
         self.step_size_mm = step_size_mm
         self.dwell_time_s = dwell_time_s
         self.passes = passes
-        self.recommended_home_steps = (
-            recommend_home_steps(self.edges, self.spmm_result) if self.spmm_result is not None else None
-        )
 
         self._log(f"X range: {area['x_range_mm']} mm")
         self._log(f"Y range: {area['y_range_mm']} mm")
@@ -629,18 +653,14 @@ class CalibrationPanel(ttk.Frame):
         ttk.Label(self.step_frame, text=summary, justify="left").grid(
             row=0, column=0, columnspan=2, sticky="w")
 
-        self.write_home_steps_var = tk.BooleanVar(value=self.recommended_home_steps is not None)
-        if self.recommended_home_steps is not None:
-            ttk.Checkbutton(
-                self.step_frame,
-                text=f"Also write home_steps={self.recommended_home_steps} (2x margin lower bound)",
-                variable=self.write_home_steps_var,
-            ).grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
-
+        # No home_steps checkbox here: that's an 8742-only concept (driving
+        # into a mechanical hard stop), which doesn't exist for the
+        # CONEX-AGAP -- see recommend_home_steps()'s docstring in
+        # calibrate_scan_area.py.
         ttk.Button(self.step_frame, text="Write to config.yaml", command=self._write_config).grid(
-            row=2, column=0, pady=(8, 0), sticky="w")
+            row=1, column=0, pady=(8, 0), sticky="w")
         ttk.Button(self.step_frame, text="Back", command=self._render_params).grid(
-            row=2, column=1, pady=(8, 0), sticky="w")
+            row=1, column=1, pady=(8, 0), sticky="w")
 
     def _write_config(self):
         results = dict(self.area)
@@ -648,11 +668,12 @@ class CalibrationPanel(ttk.Frame):
         results["step_size_mm"] = self.step_size_mm
         results["dwell_time_s"] = self.dwell_time_s
         results["passes"] = self.passes
-        if self.spmm_result is not None:
-            results["steps_per_mm_x"] = self.spmm_result["steps_per_mm_x"]
-            results["steps_per_mm_y"] = self.spmm_result["steps_per_mm_y"]
-        if self.recommended_home_steps is not None and self.write_home_steps_var.get():
-            results["home_steps"] = self.recommended_home_steps
+        # Only write deg_per_mm_x/y back if this session actually
+        # recalibrated them from a real measurement -- reusing the existing
+        # config value has nothing new to persist.
+        if self.deg_per_mm_result["recalibrated"]:
+            results["deg_per_mm_x"] = self.deg_per_mm_result["deg_per_mm_x"]
+            results["deg_per_mm_y"] = self.deg_per_mm_result["deg_per_mm_y"]
 
         try:
             failed = write_results(self.config_path, results)
@@ -734,12 +755,12 @@ class CalibrationPanel(ttk.Frame):
         self.motion = None
 
     def _reset_state(self):
-        self.edges = {}
+        self.edges_deg = {}
         self._edge_idx = 0
-        self.spmm_result = None
+        self.deg_per_mm_result = None
+        self.edges_mm = None
         self.area = None
         self.radius_mm = None
-        self.recommended_home_steps = None
         self._moved_since_checkpoint = 0.0
 
     def _clear_step_frame(self):

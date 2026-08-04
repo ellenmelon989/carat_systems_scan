@@ -117,7 +117,7 @@ class App(tk.Tk):
         clicks "Proceed to Scan". `config` is config.yaml re-read from
         disk after the Calibrate tab patched it (so it reflects exactly
         what write_results() wrote -- range, wafer center/radius, step
-        size, dwell time, passes, and steps_per_mm if recalibrated).
+        size, dwell time, passes, and deg_per_mm_x/y if recalibrated).
         `motion` is that tab's already-connected, already-homed
         controller; adopting it here (rather than discarding it) is what
         lets the very next scan skip a redundant second home().
