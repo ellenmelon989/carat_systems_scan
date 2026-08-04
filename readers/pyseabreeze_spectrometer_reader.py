@@ -216,10 +216,59 @@ class PySeabreezeSpectrometerReader(SpectrometerReader):
             self.spec.close()
 
 
+def _save_reading_csv(reading: SpectrumReading, path: str):
+    """Write one reading to a 2-column CSV: wavelength_nm, intensity.
+
+    Same header/column convention as scan/data_logger.py's per-point
+    spectra/point_XXXXX.csv (see DataLogger._write_spectrum) -- kept
+    identical on purpose so this standalone diagnostic output can be
+    opened/plotted with the same tooling as a real scan's spectra, and
+    so nothing downstream has to special-case a second schema.
+    """
+    import csv
+
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["wavelength_nm", "intensity"])
+        for wl, intens in zip(reading.wavelengths, reading.intensities):
+            writer.writerow([wl, intens])
+
+
 if __name__ == "__main__":
+    import argparse
+    from datetime import datetime
+
     # Run tools/check_seabreeze_device.py first -- this will hang/fail confusingly
     # if no device is enumerated yet.
-    reader = PySeabreezeSpectrometerReader(integration_time_us=100_000, num_averages=3)
+    parser = argparse.ArgumentParser(
+        description="Take one spectrometer reading and print/save it.",
+    )
+    parser.add_argument(
+        "--integration-time-us", type=int, default=100_000,
+        help="Integration time in microseconds (default: 100000).",
+    )
+    parser.add_argument(
+        "--num-averages", type=int, default=3,
+        help="Number of spectra to average (default: 3).",
+    )
+    parser.add_argument(
+        "--out", default=None,
+        help=(
+            "Path to write the reading as a wavelength_nm,intensity CSV. "
+            "Defaults to spectrometer_reading_<timestamp>.csv in the "
+            "current directory. Not written if the reading errored."
+        ),
+    )
+    parser.add_argument(
+        "--no-save", action="store_true",
+        help="Print only -- don't write a CSV file.",
+    )
+    args = parser.parse_args()
+
+    reader = PySeabreezeSpectrometerReader(
+        integration_time_us=args.integration_time_us,
+        num_averages=args.num_averages,
+    )
     reading = reader.read()
     if reading.error:
         print(f"Error: {reading.error}")
@@ -228,4 +277,9 @@ if __name__ == "__main__":
         print(f"Got {len(reading.wavelengths)} points, "
               f"saturated={reading.saturated}, "
               f"peak intensity={reading.intensities.max():.1f}")
+
+        if not args.no_save:
+            out_path = args.out or f"spectrometer_reading_{datetime.now():%Y%m%d_%H%M%S}.csv"
+            _save_reading_csv(reading, out_path)
+            print(f"Saved {len(reading.wavelengths)} points to {out_path}")
     reader.close()

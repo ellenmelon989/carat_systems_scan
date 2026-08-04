@@ -93,8 +93,9 @@ def run_scan(config, q, stop_event, motion=None, already_homed=False):
                "Scan stopped: motion axis state unknown after a fault "
                "(AxisStateUnknown). The stage may still be physically "
                "moving. Manual hardware check required (mechanical "
-               "binding, cabling, 8742 connection) before scanning again. "
-               "See the log for the point/position where this happened."))
+               "binding, cabling, motion controller connection) before "
+               "scanning again. See the log for the point/position where "
+               "this happened."))
     else:
         q.put(("done", None))
 

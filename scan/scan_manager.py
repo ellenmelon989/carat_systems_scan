@@ -448,7 +448,8 @@ class ScanManager:
             self.logger.log_event(
                 f"Scan STOPPED after point {point_id}: axis state unknown "
                 "after a motion fault. Check the hardware (mechanical "
-                "binding, cabling, 8742 connection) before running again."
+                "binding, cabling, motion controller connection) before "
+                "running again."
             )
             return "axis_fault"
 
