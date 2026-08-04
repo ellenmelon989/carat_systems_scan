@@ -154,6 +154,10 @@ class ConexSafetyTests(unittest.TestCase):
 
 
 class ConexRecoveryTests(unittest.TestCase):
+    def test_recovery_ceiling_is_no_higher_than_factory_default(self):
+        self.assertEqual(recovery_module._MAX_TRIAL_AMPLITUDE, 35)
+        self.assertEqual(recovery_module._MAX_TRIAL_STEPS, 100)
+
     def test_directional_xu_parser_handles_firmware_pair(self):
         self.assertEqual(
             recovery_module._directional_xu_value("-35,+35", 5), 35

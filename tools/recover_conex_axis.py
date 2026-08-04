@@ -45,7 +45,10 @@ import serial
 _CONFIRMATION = "RECOVER-OUT-OF-LIMIT-AXIS"
 _READY_STATES = {"32", "33", "34", "35", "36"}
 _MOVING_STATES = {"28", "29", "46"}
-_MAX_TRIAL_AMPLITUDE = 10
+# Newport documents 35 as the controller's power-up default.  Permit no more
+# than that standard value; the separate 100-step cap still bounds each
+# explicitly confirmed trial.
+_MAX_TRIAL_AMPLITUDE = 35
 _MAX_TRIAL_STEPS = 100
 _POLL_S = 0.02
 _MOVE_TIMEOUT_S = 15.0
