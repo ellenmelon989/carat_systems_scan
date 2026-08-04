@@ -108,6 +108,36 @@ def _needed_direction(position: float, negative: float, positive: float) -> int:
     return 0
 
 
+def _directional_xu_value(response: str, requested_amplitude: int) -> int:
+    """Select the stored XU value for the direction this trial changes.
+
+    CONEX-AGAP V2.0.3 returns both directional working values from XU? as
+    e.g. ``-35,+35``.  Some documentation/examples show only one integer, so
+    accept that form too.  Restoring only the same-sign value leaves the
+    opposite direction untouched.
+    """
+    try:
+        values = [int(part.strip()) for part in response.split(",")]
+    except ValueError as exc:
+        raise RuntimeError(f"Malformed XU response: {response!r}") from exc
+
+    if requested_amplitude > 0:
+        candidates = [value for value in values if value > 0]
+    else:
+        candidates = [value for value in values if value < 0]
+
+    if len(candidates) == 1:
+        return candidates[0]
+    if len(values) == 1:
+        # Compatibility with firmware that reports one current value.
+        return values[0]
+    raise RuntimeError(
+        f"XU response {response!r} did not contain exactly one value for "
+        f"the {'positive' if requested_amplitude > 0 else 'negative'} "
+        "direction."
+    )
+
+
 def _print_probe(probe: dict):
     print("CONEX RECOVERY PREFLIGHT (read-only)")
     print(f"  Port:       {probe['port']}")
@@ -168,7 +198,10 @@ def _execute_trial(
                 "utility will not enable or change controller state."
             )
 
-        original_amplitude = int(_query(ser, f"{address}XU{axis}?"))
+        original_response = _query(ser, f"{address}XU{axis}?")
+        original_amplitude = _directional_xu_value(
+            original_response, amplitude
+        )
         _send(ser, f"{address}XU{axis}{amplitude}")
         error = _query(ser, f"{address}TE")
         if error != "@":

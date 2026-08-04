@@ -57,7 +57,7 @@ class FakeRecoverySerial(FakeConexSerial):
         command = payload.decode("ascii").strip()
         if command == "1XUV?":
             self.commands.append(command)
-            self._response = f"1XUV{self.xu_v}\r\n".encode("ascii")
+            self._response = f"1XUV-35,+{self.xu_v}\r\n".encode("ascii")
             return len(payload)
         if command.startswith("1XUV"):
             self.commands.append(command)
@@ -154,6 +154,14 @@ class ConexSafetyTests(unittest.TestCase):
 
 
 class ConexRecoveryTests(unittest.TestCase):
+    def test_directional_xu_parser_handles_firmware_pair(self):
+        self.assertEqual(
+            recovery_module._directional_xu_value("-35,+35", 5), 35
+        )
+        self.assertEqual(
+            recovery_module._directional_xu_value("-35,+35", -5), -35
+        )
+
     def test_one_recovery_invocation_sends_exactly_one_bounded_batch(self):
         fake = FakeRecoverySerial()
         probe = {
