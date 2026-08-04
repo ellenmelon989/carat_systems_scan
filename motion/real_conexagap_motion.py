@@ -668,6 +668,13 @@ class ConexAGAPController(MotionController):
         requires explicit motion permission, an in-limit starting position,
         and an in-limit final target.  It cannot be used to recover an axis
         that is already outside SL/SR; use the dedicated recovery utility.
+
+        Although the public operation is relative to the live encoder, the
+        command sent to the controller is PA (absolute), not PR.  Newport
+        defines PR relative to the *previous target* (TH), which may differ
+        from the live TP position after an open-loop recovery or interrupted
+        move.  Computing and validating an absolute target from live TP keeps
+        this calibration jog bounded by exactly the position checked here.
         """
         axis = str(axis_letter).strip().upper()
         if axis not in ("U", "V"):
@@ -682,10 +689,11 @@ class ConexAGAPController(MotionController):
         self._assert_current_positions_within_limits(
             f"relative jog on axis {axis}"
         )
-        target = self._get_axis_position(axis) + delta
+        current = self._get_axis_position(axis)
+        target = current + delta
         self._validate_axis_target(axis, target)
         self._ensure_enabled()
-        self._send(f"{self._address}PR{axis}{delta:.6f}")
+        self._send(f"{self._address}PA{axis}{target:.6f}")
         self._wait_move(label=f"jog {axis}")
 
     def get_position(self) -> tuple[float, float]:

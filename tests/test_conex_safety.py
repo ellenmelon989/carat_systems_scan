@@ -152,6 +152,21 @@ class ConexSafetyTests(unittest.TestCase):
         self.assertIn("1PAU0.100000", fake.commands)
         self.assertIn("1PAV0.200000", fake.commands)
 
+    def test_raw_axis_jog_uses_live_position_not_stale_relative_target(self):
+        fake = FakeConexSerial(position_u=0.2)
+        controller = self.make_controller(fake, motion_enabled=True)
+
+        controller.jog_axis_relative("U", 0.05)
+
+        # Newport PR is relative to the controller's previous target, not
+        # live TP.  A stale target after recovery could therefore produce a
+        # different move than the one validated in software.  PA must use
+        # the explicit target derived from the live 0.2-degree position.
+        self.assertIn("1PAU0.250000", fake.commands)
+        self.assertFalse(
+            any(command.startswith("1PRU") for command in fake.commands)
+        )
+
 
 class ConexRecoveryTests(unittest.TestCase):
     def test_recovery_ceiling_is_no_higher_than_factory_default(self):
