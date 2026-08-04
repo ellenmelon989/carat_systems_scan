@@ -20,7 +20,9 @@ was checked directly against the installed seabreeze package, not assumed
 from memory.
 """
 
+import os
 import time
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -31,6 +33,112 @@ except ImportError:
     # Fallback for running this file directly (e.g. python pyseabreeze_spectrometer_reader.py),
     # where relative imports don't work because there's no parent package.
     from spectrometer_reader_base import SpectrometerReader, SpectrumReading, boxcar_smooth
+
+
+_LIBUSB_DLL_DIRECTORY_HANDLE = None
+
+
+def _prepare_windows_libusb_runtime():
+    """Make a venv-installed libusb-package DLL discoverable on Windows.
+
+    This keeps the USB runtime inside the virtual environment instead of
+    requiring a copy in C:\\Windows\\System32.  If libusb-package is absent,
+    SeaBreeze retains its normal system-library discovery behavior.
+    """
+    global _LIBUSB_DLL_DIRECTORY_HANDLE
+
+    if os.name != "nt":
+        return
+
+    try:
+        import libusb_package
+    except ImportError:
+        return
+
+    library_path = libusb_package.get_library_path()
+    if not library_path:
+        return
+
+    dll_directory = str(Path(library_path).resolve().parent)
+    path_entries = os.environ.get("PATH", "").split(os.pathsep)
+    if dll_directory not in path_entries:
+        os.environ["PATH"] = dll_directory + os.pathsep + os.environ.get("PATH", "")
+
+    # Python 3.8+ uses an explicit DLL directory API on Windows.  Retain the
+    # returned handle for the life of this module; discarding it removes the
+    # directory from the process search path.
+    if hasattr(os, "add_dll_directory") and _LIBUSB_DLL_DIRECTORY_HANDLE is None:
+        try:
+            _LIBUSB_DLL_DIRECTORY_HANDLE = os.add_dll_directory(dll_directory)
+        except OSError:
+            # Some unpatched Windows 7 installations do not expose the API.
+            # The PATH entry above remains the compatible fallback.
+            pass
+
+
+def _adc1000_get_spectrum_raw_with_retry(feature):
+    """Retry an ADC1000 acquisition after a transient short USB response.
+
+    The ADC1000 spectrum is one 4097-byte transfer.  Some libusb routes first
+    return only one 64/65-byte response (or an overflow/timeout) while the
+    device and endpoint synchronize.  That short response is not a fragment
+    of a spectrum and must be discarded.  Request a fresh spectrum, as the
+    successful workaround reported for this device family does.
+    """
+    from usb.core import USBError
+
+    expected = int(feature._spectrum_raw_length)
+    transport = feature.protocol.transport
+    timeout_ms = int(feature._integration_time * 1e-3 + transport.default_timeout_ms)
+    mode = transport._default_read_spectrum_endpoint
+    attempts = []
+
+    for attempt in range(1, 5):
+        feature.protocol.send(0x09)
+        try:
+            response = feature.protocol.receive(
+                size=expected,
+                timeout_ms=timeout_ms,
+                mode=mode,
+            )
+        except USBError as exc:
+            attempts.append(f"attempt {attempt}: {exc}")
+            if attempt == 4:
+                raise RuntimeError(
+                    "ADC1000 did not return a complete spectrum after four "
+                    f"requests ({'; '.join(attempts)})."
+                ) from exc
+            continue
+
+        received = len(response)
+        if received == expected:
+            return np.frombuffer(response, dtype=np.uint8).copy()
+        if received > expected:
+            raise RuntimeError(
+                f"ADC1000 returned too much spectrum data: "
+                f"{received} bytes, expected {expected}."
+            )
+        attempts.append(f"attempt {attempt}: {received}/{expected} bytes")
+
+    raise RuntimeError(
+        "ADC1000 returned only short USB responses after four requests "
+        f"({'; '.join(attempts)})."
+    )
+
+
+def _install_adc1000_read_retry_workaround():
+    """Patch only SeaBreeze's ADC1000 feature class for this process."""
+    from seabreeze.pyseabreeze.features.spectrometer import (
+        SeaBreezeSpectrometerFeatureADC,
+    )
+
+    if getattr(SeaBreezeSpectrometerFeatureADC, "_carat_read_retry", False):
+        return
+
+    SeaBreezeSpectrometerFeatureADC._get_spectrum_raw = (
+        _adc1000_get_spectrum_raw_with_retry
+    )
+    SeaBreezeSpectrometerFeatureADC._carat_read_retry = True
 
 
 class PySeabreezeSpectrometerReader(SpectrometerReader):
@@ -45,8 +153,10 @@ class PySeabreezeSpectrometerReader(SpectrometerReader):
         self._init_error: Optional[str] = None
 
         try:
+            _prepare_windows_libusb_runtime()
             import seabreeze
             seabreeze.use('pyseabreeze')
+            _install_adc1000_read_retry_workaround()
             from seabreeze.spectrometers import Spectrometer
             self.spec = (Spectrometer.from_serial_number(serial) if serial
                          else Spectrometer.from_first_available())
@@ -114,6 +224,7 @@ if __name__ == "__main__":
     if reading.error:
         print(f"Error: {reading.error}")
     else:
+        print(f"Connected to {reader.spec.model}, serial={reader.spec.serial_number}")
         print(f"Got {len(reading.wavelengths)} points, "
               f"saturated={reading.saturated}, "
               f"peak intensity={reading.intensities.max():.1f}")

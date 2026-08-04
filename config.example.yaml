@@ -39,7 +39,7 @@ motion:
   # rollback -- don't delete it until the CONEX-AGAP is confirmed reliable
   # on-site.
   controller: conex_agap
-  port: "COM5"                # REQUIRED -- Windows COM port (Device Manager >
+  port: "COM4"                # REQUIRED -- Windows COM port (Device Manager >
                                # Ports (COM & LPT), once the Newport USB driver
                                # from "USB Driver Installation Manual.pdf" is
                                # installed). Find with:
@@ -73,6 +73,7 @@ motion:
                                # into-a-wall homing.
   move_timeout_s: 30          # per-axis move timeout (settle poll)
   stop_confirm_timeout_s: 10  # how long to wait for an explicit ST to land
+  serial_timeout_s: 2         # seconds to wait for each controller reply
   homing_required: true
   soft_limits:
     x_min_mm: 0

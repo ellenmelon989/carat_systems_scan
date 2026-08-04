@@ -217,6 +217,165 @@ _MOVING_STATES = {"28", "29", "46"}   # MOVING CL, STEPPING OL, JOGGING OL
 _CONFIG_STATE = "14"
 _DISABLE_STATES = {"3C", "3D"}
 _READY_STATES = {"32", "33", "34", "35", "36"}
+_STATE_NAMES = {
+    "14": "CONFIGURATION",
+    "28": "MOVING CL",
+    "29": "STEPPING OL",
+    "32": "READY from reset",
+    "33": "READY from closed-loop move",
+    "34": "READY from disable",
+    "35": "READY from jog",
+    "36": "READY from step",
+    "3C": "DISABLE from ready",
+    "3D": "DISABLE from closed-loop move",
+    "46": "JOGGING OL",
+}
+
+
+def probe_conex_connection(port: str, address: int = _DEFAULT_CONTROLLER_ADDRESS,
+                           serial_timeout: float = _DEFAULT_SERIAL_TIMEOUT,
+                           serial_factory=None) -> dict:
+    """Open the CONEX port and perform a no-motion communications check.
+
+    The probe deliberately does not instantiate :class:`ConexAGAPController`:
+    normal construction may send ``MM1`` when the controller is disabled so it
+    is ready for later motion.  A connection diagnostic should not alter the
+    controller state.  Only commands accepted in every state and incapable of
+    commanding motion are used here:
+
+    ``VE`` (firmware), ``ID?`` (stage identifier), ``TPU``/``TPV``
+    (live strain-gage positions), ``THU``/``THV`` (targets), ``MM?``
+    (controller state), and the read-only ``SL[a]?``/``SR[a]?`` software-limit
+    queries.  The question mark is essential on SL/SR and MM: without it
+    those commands set a value or alter state instead of reading one.
+
+    ``serial_factory`` is an internal test seam.  Production callers should
+    leave it as ``None`` so :class:`serial.Serial` is used.
+    """
+    if not port or not str(port).strip():
+        raise ValueError("A CONEX COM port is required (for example, COM4).")
+
+    address = int(address)
+    if not 1 <= address <= 31:
+        raise ValueError(f"CONEX controller address must be 1-31, got {address}.")
+
+    timeout = float(serial_timeout)
+    if timeout <= 0:
+        raise ValueError(f"serial_timeout must be greater than zero, got {timeout}.")
+
+    factory = serial_factory or serial.Serial
+    ser = None
+
+    def query(command: str) -> tuple[str, str]:
+        ser.reset_input_buffer()
+        ser.write((command + _TERMINATOR).encode("ascii"))
+        ser.flush()
+        raw = ser.readline()
+        if not raw:
+            raise RuntimeError(
+                f"No response to {command!r} after {timeout:g} seconds."
+            )
+
+        response = raw.decode("ascii", errors="replace").strip()
+        prefix = command[:-1] if command.endswith("?") else command
+        if not response.upper().startswith(prefix.upper()):
+            raise RuntimeError(
+                f"Unexpected response {response!r} to {command!r}; expected "
+                f"it to begin with {prefix!r}."
+            )
+        return response[len(prefix):].strip(), response
+
+    try:
+        ser = factory(
+            port=str(port).strip(),
+            baudrate=_BAUD_RATE,
+            bytesize=_BYTESIZE,
+            parity=_PARITY,
+            stopbits=_STOPBITS,
+            xonxoff=_XONXOFF,
+            timeout=timeout,
+            write_timeout=timeout,
+        )
+
+        # Give the Windows USB-serial driver a moment to finish opening the
+        # virtual COM port before the first request.  This does not reset or
+        # enable the controller.
+        time.sleep(0.1)
+
+        revision, raw_revision = query(f"{address}VE")
+        stage_id, raw_stage_id = query(f"{address}ID?")
+        position_u_text, raw_position_u = query(f"{address}TPU")
+        position_v_text, raw_position_v = query(f"{address}TPV")
+        target_u_text, raw_target_u = query(f"{address}THU")
+        target_v_text, raw_target_v = query(f"{address}THV")
+        state_text, raw_state = query(f"{address}MM?")
+        negative_u_text, raw_negative_u = query(f"{address}SLU?")
+        positive_u_text, raw_positive_u = query(f"{address}SRU?")
+        negative_v_text, raw_negative_v = query(f"{address}SLV?")
+        positive_v_text, raw_positive_v = query(f"{address}SRV?")
+
+        try:
+            position_u = float(position_u_text)
+            position_v = float(position_v_text)
+            target_u = float(target_u_text)
+            target_v = float(target_v_text)
+            negative_u = float(negative_u_text)
+            positive_u = float(positive_u_text)
+            negative_v = float(negative_v_text)
+            positive_v = float(positive_v_text)
+        except ValueError as exc:
+            raise RuntimeError(
+                "CONEX replied, but a position or software-limit value was "
+                "not numeric: "
+                f"position U={position_u_text!r}, V={position_v_text!r}; "
+                f"target U={target_u_text!r}, V={target_v_text!r}; "
+                f"limits U=({negative_u_text!r}, {positive_u_text!r}), "
+                f"V=({negative_v_text!r}, {positive_v_text!r})."
+            ) from exc
+
+        return {
+            "port": str(port).strip(),
+            "address": address,
+            "revision": revision,
+            "stage_id": stage_id,
+            "position_u_deg": position_u,
+            "position_v_deg": position_v,
+            "target_u_deg": target_u,
+            "target_v_deg": target_v,
+            "controller_state": state_text.upper(),
+            "controller_state_name": _STATE_NAMES.get(
+                state_text.upper(), "unknown state"
+            ),
+            "negative_limit_u_deg": negative_u,
+            "positive_limit_u_deg": positive_u,
+            "negative_limit_v_deg": negative_v,
+            "positive_limit_v_deg": positive_v,
+            "raw_responses": [
+                raw_revision,
+                raw_stage_id,
+                raw_position_u,
+                raw_position_v,
+                raw_target_u,
+                raw_target_v,
+                raw_state,
+                raw_negative_u,
+                raw_positive_u,
+                raw_negative_v,
+                raw_positive_v,
+            ],
+        }
+    except Exception as exc:
+        if isinstance(exc, (ValueError, RuntimeError)):
+            raise
+        raise RuntimeError(
+            f"Could not communicate with the CONEX on {port}: {exc}"
+        ) from exc
+    finally:
+        if ser is not None:
+            try:
+                ser.close()
+            except Exception:
+                pass
 
 
 class ConexAGAPController(MotionController):
@@ -533,7 +692,7 @@ class ConexAGAPController(MotionController):
         """
         Send a query command (ends in '?', or TS/TE/TB/VE/ID) and return
         the response with the "{address}{command}" prefix stripped off,
-        e.g. querying "1TPU?" returns just the numeric string.
+        e.g. querying "1TPU" returns just the numeric string.
 
         Prefix is derived from the exact command string just sent
         (minus a trailing '?', if any) rather than by scanning the
@@ -576,8 +735,13 @@ class ConexAGAPController(MotionController):
         return resp
 
     def _get_axis_position(self, axis_letter: str) -> float:
-        """Live TP[a]? query, in native degrees."""
-        value = self._query(f"{self._address}TP{axis_letter}?")
+        """Live TP[a] query, in native degrees.
+
+        TP is a get-only command on CONEX-AGAP.  Newport documents it as
+        ``xxTP[a]`` (for example, ``1TPU``), without the question mark used
+        by set/get parameter commands such as ID?.
+        """
+        value = self._query(f"{self._address}TP{axis_letter}")
         return float(value)
 
     def _get_state(self) -> str:
