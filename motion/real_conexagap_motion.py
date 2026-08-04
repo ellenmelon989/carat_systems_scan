@@ -130,6 +130,8 @@ Config keys (under motion:)
                               # Device Manager > Ports (COM & LPT).
   controller_address: 1      # CONEX-AGAP factory default over USB. Only
                               # change if it's been reconfigured for RS-485.
+  motion_enabled: false      # explicit operator interlock; fail-closed
+  calibration_confirmed: false # true only after measured CONEX deg/mm
   axis_x: "U"                # which CONEX axis letter ('U' or 'V') drives
   axis_y: "V"                # scan-grid X / Y -- CONFIRM by jogging, don't
                               # assume U=X.
@@ -206,9 +208,12 @@ _DEFAULT_HARD_HOME = False
 _DEFAULT_MOVE_TIMEOUT = 30.0
 _DEFAULT_STOP_CONFIRM_TIMEOUT = 10.0
 _DEFAULT_SERIAL_TIMEOUT = 2.0      # per-read timeout for the serial port itself
+_DEFAULT_MOTION_ENABLED = False
+_DEFAULT_CALIBRATION_CONFIRMED = False
 _STOP_CONFIRM_POLL_S = 0.05
 _MOVE_POLL_S = 0.05
 _SETTLE_CONFIRM_DELAY_S = 0.1  # mirrors real_newport_motion.py's double-read
+_LIMIT_POSITION_TOLERANCE_DEG = 0.005
 
 # TS controller-state codes (last 2 chars of the TS reply) that mean the
 # axis is actively in motion -- see Controller Documentation section 2.4,
@@ -238,10 +243,10 @@ def probe_conex_connection(port: str, address: int = _DEFAULT_CONTROLLER_ADDRESS
     """Open the CONEX port and perform a no-motion communications check.
 
     The probe deliberately does not instantiate :class:`ConexAGAPController`:
-    normal construction may send ``MM1`` when the controller is disabled so it
-    is ready for later motion.  A connection diagnostic should not alter the
-    controller state.  Only commands accepted in every state and incapable of
-    commanding motion are used here:
+    the normal controller refuses an out-of-limit encoder and is intended for
+    later motion workflows, while a connection diagnostic must remain usable
+    to describe a fault without altering controller state.  Only commands
+    accepted in every state and incapable of commanding motion are used here:
 
     ``VE`` (firmware), ``ID?`` (stage identifier), ``TPU``/``TPV``
     (live strain-gage positions), ``THU``/``THV`` (targets), ``MM?``
@@ -428,6 +433,19 @@ class ConexAGAPController(MotionController):
         self._eff_deg_per_mm_y = self._steps_per_mm_y * (-1.0 if self._invert_y else 1.0)
 
         self._hard_home = bool(motion_cfg.get("hard_home", _DEFAULT_HARD_HOME))
+        # Two independent fail-closed interlocks.  motion_enabled is the
+        # operator's deliberate permission to command hardware.  The separate
+        # calibration_confirmed flag prevents an old 8742 steps/mm value (or
+        # this driver's 500 placeholder) from becoming a CONEX degrees/mm
+        # command merely because motion was enabled.
+        self._motion_enabled = bool(
+            motion_cfg.get("motion_enabled", _DEFAULT_MOTION_ENABLED)
+        )
+        self._calibration_confirmed = bool(
+            motion_cfg.get(
+                "calibration_confirmed", _DEFAULT_CALIBRATION_CONFIRMED
+            )
+        )
         self._move_timeout = float(motion_cfg.get("move_timeout_s", _DEFAULT_MOVE_TIMEOUT))
         self._stop_confirm_timeout = float(
             motion_cfg.get("stop_confirm_timeout_s", _DEFAULT_STOP_CONFIRM_TIMEOUT)
@@ -504,7 +522,15 @@ class ConexAGAPController(MotionController):
                 "COM port (not e.g. a different instrument's port)?"
             ) from exc
 
-        self._ensure_enabled()
+        # Construction must never change controller state.  In particular,
+        # do not send MM1 here: GUI startup and diagnostics are not permission
+        # to enable motion.  Also fail before a normal controller object can
+        # be used if the encoder is already outside the stored SL/SR limits.
+        try:
+            self._assert_current_positions_within_limits("controller startup")
+        except Exception:
+            self.close()
+            raise
 
     # ------------------------------------------------------------------
     # MotionController interface
@@ -526,8 +552,12 @@ class ConexAGAPController(MotionController):
                           Fiducial-based workflow, unchanged from the
                           8742 driver.
         """
-        self._ensure_enabled()
         if self._hard_home:
+            self._require_motion_permission("hard home", require_calibration=False)
+            self._assert_current_positions_within_limits("hard home")
+            self._validate_axis_target(self._axis_x, 0.0)
+            self._validate_axis_target(self._axis_y, 0.0)
+            self._ensure_enabled()
             logger.info("Hard-homing: driving both axes to controller zero (0 deg)")
             self._send(f"{self._address}PA{self._axis_x}0")
             self._send(f"{self._address}PA{self._axis_y}0")
@@ -573,7 +603,6 @@ class ConexAGAPController(MotionController):
         keep using the ALREADY-established origin from earlier in the
         same physical session, mirroring the 8742 case).
         """
-        self._ensure_enabled()
         if self._hard_home:
             self.home()
         else:
@@ -613,6 +642,9 @@ class ConexAGAPController(MotionController):
         if not self._homed:
             raise RuntimeError("Must call home() before move_to().")
 
+        self._require_motion_permission("move_to", require_calibration=True)
+        self._assert_current_positions_within_limits("move_to")
+
         target_u = self._origin_u + x_mm * self._eff_deg_per_mm_x
         target_v = self._origin_v + y_mm * self._eff_deg_per_mm_y
 
@@ -621,8 +653,40 @@ class ConexAGAPController(MotionController):
             x_mm, y_mm, self._axis_x, target_u, self._axis_y, target_v,
         )
 
+        # Validate BOTH targets before sending EITHER command.  Otherwise an
+        # invalid second-axis target could leave the first axis moving alone.
+        self._validate_axis_target(self._axis_x, target_u)
+        self._validate_axis_target(self._axis_y, target_v)
+        self._ensure_enabled()
         self._send(f"{self._address}PA{self._axis_x}{target_u:.6f}")
         self._send(f"{self._address}PA{self._axis_y}{target_v:.6f}")
+
+    def jog_axis_relative(self, axis_letter: str, delta_deg: float):
+        """Guarded raw-axis direction test in native degrees.
+
+        This is intentionally separate from scan-grid calibration.  It still
+        requires explicit motion permission, an in-limit starting position,
+        and an in-limit final target.  It cannot be used to recover an axis
+        that is already outside SL/SR; use the dedicated recovery utility.
+        """
+        axis = str(axis_letter).strip().upper()
+        if axis not in ("U", "V"):
+            raise ValueError(f"axis must be 'U' or 'V', got {axis_letter!r}")
+        delta = float(delta_deg)
+        if delta == 0.0:
+            raise ValueError("relative jog must be non-zero")
+
+        self._require_motion_permission(
+            f"relative jog on axis {axis}", require_calibration=False
+        )
+        self._assert_current_positions_within_limits(
+            f"relative jog on axis {axis}"
+        )
+        target = self._get_axis_position(axis) + delta
+        self._validate_axis_target(axis, target)
+        self._ensure_enabled()
+        self._send(f"{self._address}PR{axis}{delta:.6f}")
+        self._wait_move(label=f"jog {axis}")
 
     def get_position(self) -> tuple[float, float]:
         """
@@ -743,6 +807,70 @@ class ConexAGAPController(MotionController):
         """
         value = self._query(f"{self._address}TP{axis_letter}")
         return float(value)
+
+    def _get_axis_limits(self, axis_letter: str) -> tuple[float, float]:
+        """Read the controller's stored negative/positive limits."""
+        axis = str(axis_letter).strip().upper()
+        negative = float(self._query(f"{self._address}SL{axis}?"))
+        positive = float(self._query(f"{self._address}SR{axis}?"))
+        if negative >= positive:
+            raise RuntimeError(
+                f"Malformed controller limits for axis {axis}: "
+                f"{negative:.6f} to {positive:.6f} deg"
+            )
+        return negative, positive
+
+    def _assert_current_positions_within_limits(self, context: str):
+        """Fail closed if either live encoder lies outside stored SL/SR."""
+        problems = []
+        for axis in ("U", "V"):
+            position = self._get_axis_position(axis)
+            negative, positive = self._get_axis_limits(axis)
+            if not (
+                negative - _LIMIT_POSITION_TOLERANCE_DEG
+                <= position
+                <= positive + _LIMIT_POSITION_TOLERANCE_DEG
+            ):
+                problems.append(
+                    f"{axis}={position:.6f} deg outside "
+                    f"[{negative:.6f}, {positive:.6f}]"
+                )
+        if problems:
+            raise MotionFault(
+                f"CONEX motion blocked during {context}: "
+                + "; ".join(problems)
+                + ". Do not use PA/PR, the GUI, calibration, or scanning. "
+                "Recover the axis with the dedicated open-loop recovery "
+                "utility, then rerun the read-only CONEX diagnostic."
+            )
+
+    def _validate_axis_target(self, axis_letter: str, target_deg: float):
+        """Reject an absolute target outside the live controller limits."""
+        axis = str(axis_letter).strip().upper()
+        target = float(target_deg)
+        negative, positive = self._get_axis_limits(axis)
+        if not negative <= target <= positive:
+            raise MotionFault(
+                f"CONEX target blocked: axis {axis} target {target:.6f} deg "
+                f"is outside stored limits [{negative:.6f}, "
+                f"{positive:.6f}] deg. No motion was commanded."
+            )
+
+    def _require_motion_permission(
+        self, operation: str, require_calibration: bool
+    ):
+        """Require explicit config interlocks before any normal motion."""
+        if not self._motion_enabled:
+            raise MotionFault(
+                f"CONEX {operation} blocked: set motion.motion_enabled: true "
+                "only after the hardware position and optical path are safe."
+            )
+        if require_calibration and not self._calibration_confirmed:
+            raise MotionFault(
+                f"CONEX {operation} blocked: motion.calibration_confirmed "
+                "is false. Replace the old 8742 steps_per_mm values with "
+                "measured CONEX degrees/mm values before enabling scan moves."
+            )
 
     def _get_state(self) -> str:
         """
@@ -906,6 +1034,10 @@ if __name__ == "__main__":
                         help="Move axis U by this many degrees (relative) to test direction/wiring")
     parser.add_argument("--jog-v", type=float, default=None,
                         help="Move axis V by this many degrees (relative) to test direction/wiring")
+    parser.add_argument(
+        "--allow-motion", action="store_true",
+        help="Explicitly permit the optional --jog-u/--jog-v command",
+    )
     args = parser.parse_args()
 
     if args.list_ports:
@@ -923,6 +1055,8 @@ if __name__ == "__main__":
             "axis_x": args.axis_x,
             "axis_y": args.axis_y,
             "hard_home": False,   # soft home for smoke test -- safer
+            "motion_enabled": args.allow_motion,
+            "calibration_confirmed": False,
         }
     }
 
@@ -936,14 +1070,12 @@ if __name__ == "__main__":
         # before axis_x/axis_y in config.yaml are even decided.
         if args.jog_u is not None:
             print(f"\n=== Jogging axis U by {args.jog_u} deg (relative, raw PR) ===")
-            mc._send(f"{mc._address}PRU{args.jog_u:.6f}")
-            mc._wait_move(label="jog U")
+            mc.jog_axis_relative("U", args.jog_u)
             print(f"Raw TP: U={mc._get_axis_position('U'):.5f}  V={mc._get_axis_position('V'):.5f}")
 
         if args.jog_v is not None:
             print(f"\n=== Jogging axis V by {args.jog_v} deg (relative, raw PR) ===")
-            mc._send(f"{mc._address}PRV{args.jog_v:.6f}")
-            mc._wait_move(label="jog V")
+            mc.jog_axis_relative("V", args.jog_v)
             print(f"Raw TP: U={mc._get_axis_position('U'):.5f}  V={mc._get_axis_position('V'):.5f}")
 
     print("\nDone.")

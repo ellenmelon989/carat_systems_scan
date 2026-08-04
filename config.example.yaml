@@ -46,6 +46,10 @@ motion:
                                #   python motion/real_conexagap_motion.py --list-ports
   controller_address: 1       # CONEX-AGAP factory default over USB (only
                                # matters if reconfigured for RS-485).
+  motion_enabled: false       # FAIL-CLOSED operator interlock. Leave false
+                               # during connection checks and axis recovery.
+  calibration_confirmed: false # Set true only after replacing the old 8742
+                                # ratios with measured CONEX degrees/mm values.
   axis_x: "U"                 # which CONEX axis LETTER ('U' or 'V') drives
   axis_y: "V"                 # scan-grid X/Y -- CONFIRM by jogging each letter
                                # individually and watching the mirror, same as
