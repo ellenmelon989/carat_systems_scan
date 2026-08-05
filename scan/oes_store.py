@@ -163,6 +163,18 @@ class OESStore:
         np_ = self.n_passes
         nl = len(wavelengths)
 
+        # Defensive: normally scan_manager.py has already created
+        # output.base_dir before this ever runs, but output.oes_hdf5 can
+        # be pointed at an arbitrary path outside base_dir (see config.yaml),
+        # whose parent directory nothing else guarantees exists. Without
+        # this, h5py.File(path, "w") below fails with "Unable to
+        # synchronously create file ... No such file or directory" -- a
+        # confusing error that names the wrong problem (looks like a
+        # hardware/file-corruption issue, not a missing folder).
+        parent = os.path.dirname(self.path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+
         with h5py.File(self.path, "w") as f:
             f.create_dataset("x_mm", data=self.x_coords)
             f.create_dataset("y_mm", data=self.y_coords)

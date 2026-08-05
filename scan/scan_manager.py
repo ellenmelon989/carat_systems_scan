@@ -280,6 +280,20 @@ class ScanManager:
         # two runs can never collide on the same output.base_dir.
         config["output"]["base_dir"] = resolve_run_dir(config["output"]["base_dir"])
 
+        # Create the dated run dir now, before anything tries to write into
+        # it. OESStore below can eagerly write oes.h5 (see its wavelengths=
+        # comment) as soon as it's constructed, which happens BEFORE
+        # DataLogger.__init__ -- previously the only place that called
+        # os.makedirs() on base_dir. That ordering meant a successful
+        # spectrometer connection made h5py.File(path, "w") the first thing
+        # to touch this not-yet-existent directory, failing with h5py's
+        # "Unable to synchronously create file (unable to open file: ...
+        # errno = 2, error message = 'No such file or directory')" instead
+        # of a clear "failed to initialize scan hardware" cause. Making the
+        # dir here, right after base_dir is finalized, removes the ordering
+        # dependency on DataLogger entirely.
+        _os.makedirs(config["output"]["base_dir"], exist_ok=True)
+
         # Build OESStore from grid coords so it's ready before the scan starts.
         # Pass the spectrometer's wavelength calibration (known from
         # connection, not from a successful read) so the HDF5 file is
