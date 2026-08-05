@@ -41,7 +41,7 @@ import numpy as np
 from motion.motion_controller import get_motion_controller, AxisStateUnknown
 from readers.ir_reader_base import get_ir_reader
 from readers.spectrometer_reader_base import get_spectrometer_reader
-from scan.data_logger import DataLogger, build_point_record
+from scan.data_logger import DataLogger, build_point_record, resolve_run_dir
 from scan.oes_store import OESStore
 from scan.scan_params import (
     PASSES_DEFAULT,
@@ -270,8 +270,27 @@ class ScanManager:
                     )
             raise
 
+        # Stamp output.base_dir with this run's date/time BEFORE it's used
+        # for anything below (the default oes.h5 path and DataLogger's
+        # CSV/metadata/log/spectra all derive from it) -- see
+        # resolve_run_dir()'s docstring in data_logger.py. The operator's
+        # configured/typed base_dir becomes a parent directory that each
+        # scan gets its own dated subfolder under, so every scan's saved
+        # data is labeled with when it ran without operator effort, and
+        # two runs can never collide on the same output.base_dir.
+        config["output"]["base_dir"] = resolve_run_dir(config["output"]["base_dir"])
+
         # Build OESStore from grid coords so it's ready before the scan starts.
-        # Wavelength dimension is initialized lazily on first write_point().
+        # Pass the spectrometer's wavelength calibration (known from
+        # connection, not from a successful read) so the HDF5 file is
+        # fully pre-allocated now rather than lazily on first
+        # write_point() -- otherwise a motion or OES failure on the
+        # scan's very first point (both pass wavelengths=None) raises
+        # ValueError out of OESStore before it's ever initialized and
+        # aborts the entire scan over one bad point. self.spectrometer.
+        # wavelengths is None only if the reader itself never connected
+        # (e.g. pyseabreeze couldn't find the device), in which case
+        # OESStore falls back to the old lazy-init behavior.
         # n_passes must be given upfront so the pass axis can be
         # pre-allocated (see oes_store.py) — a later pass overwriting a
         # smaller array would silently discard earlier passes' data.
@@ -280,7 +299,9 @@ class ScanManager:
             "oes_hdf5",
             config["output"]["base_dir"] + "/oes.h5",
         )
-        self.store = OESStore(hdf5_path, x_coords_mm=xs, y_coords_mm=ys, n_passes=self.passes)
+        self.store = OESStore(hdf5_path, x_coords_mm=xs, y_coords_mm=ys,
+                               n_passes=self.passes,
+                               wavelengths=self.spectrometer.wavelengths)
 
         self.logger = DataLogger(config, store=self.store)
 
@@ -375,7 +396,8 @@ class ScanManager:
         """
         self.logger.write_metadata()
         self.logger.log_event(f"Scan started ({self.passes} pass"
-                               f"{'es' if self.passes != 1 else ''})")
+                               f"{'es' if self.passes != 1 else ''}), "
+                               f"output dir: {self.config['output']['base_dir']}")
 
         if already_homed:
             self.logger.log_event(

@@ -35,6 +35,40 @@ import yaml
 _SECRET_KEY_MARKERS = ("key", "token", "secret", "password")
 
 
+def resolve_run_dir(base_dir, when=None):
+    """
+    Append a scan_<YYYYMMDD_HHMMSS> subfolder to base_dir so every scan
+    run gets its own uniquely dated/timestamped output directory
+    automatically -- the operator's output.base_dir field (config.yaml,
+    or the GUI's "Output dir" box) is treated as a PARENT location to
+    file runs under, not the run's own directory.
+
+    Call this once, before base_dir is used to derive anything else
+    (see ScanManager.__init__, which calls this before computing the
+    default oes.h5 path) -- so the HDF5 store and DataLogger's
+    CSV/metadata/log/spectra all resolve against the identical,
+    already-timestamped path rather than drifting apart if resolved
+    twice a few milliseconds apart.
+
+    This also closes the "silent output-dir-reuse corruption" gap the
+    WARNING in DataLogger.__init__ below guards against: reusing the
+    same static base_dir across two scans used to append a second run's
+    rows under the first run's header, with point_id restarting from 0.
+    Every run now gets a fresh directory by construction, so that
+    collision can no longer happen from an unchanged output.base_dir
+    alone. (The warning stays as a backstop for the case where an
+    operator manually points two different runs at the exact same
+    already-timestamped path, or calls DataLogger directly without
+    going through this function.)
+
+    when : datetime, optional
+        Defaults to datetime.now(). Exposed for tests that need a
+        deterministic directory name.
+    """
+    timestamp = (when or datetime.now()).strftime("%Y%m%d_%H%M%S")
+    return os.path.join(base_dir, f"scan_{timestamp}")
+
+
 def _redact_secrets(obj):
     """
     Recursively deep-copy a config dict, replacing the value of any
@@ -86,17 +120,23 @@ class DataLogger:
         os.makedirs(self.spectra_dir, exist_ok=True)
 
         # Loud, not silent: reusing an output.base_dir from an earlier scan
-        # (e.g. the default ./scan_data left unchanged between runs) means
-        # _append_summary_row below opens summary_path in "a" (append)
-        # mode -- write_header only fires when the file doesn't already
-        # exist, so a pre-existing summary CSV silently gets a SECOND
-        # scan's rows appended under the FIRST scan's header, with
+        # means _append_summary_row below opens summary_path in "a"
+        # (append) mode -- write_header only fires when the file doesn't
+        # already exist, so a pre-existing summary CSV silently gets a
+        # SECOND scan's rows appended under the FIRST scan's header, with
         # point_id restarting from 0 and no column-count check between the
         # two runs. That's silent data corruption for anything downstream
         # (map_plotter.py, manual analysis) that assumes one CSV == one
         # scan. This can't be fixed by refusing to run (a genuine
         # multi-session append might be intentional), so at minimum make
         # it visible: warn once, here, before anything is written.
+        #
+        # ScanManager.__init__ runs every base_dir through resolve_run_dir()
+        # above before constructing this class, which appends a fresh
+        # scan_<timestamp> subfolder per run -- so in the normal app/CLI
+        # flow this warning should be rare (only fires if two runs
+        # started in the same second, or if DataLogger is constructed
+        # directly without going through resolve_run_dir first).
         if os.path.exists(self.summary_path):
             # self.log_event (not print): writes to BOTH stdout and
             # scan_log.txt in this same base_dir, so the warning survives

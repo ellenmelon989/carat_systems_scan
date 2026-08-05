@@ -42,6 +42,17 @@ class OceanDirectSpectrometerReader(SpectrometerReader):
     TODO: Fill in real OceanDirect API calls once the SDK is available.
     The interface contract (read() -> SpectrumReading, set_integration_time(),
     close()) is fixed — scan_manager.py will not need to change.
+
+    NOTE: until the TODOs below are filled in, __init__ always raises
+    NotImplementedError internally and self._wavelengths stays None, so
+    the base class's `.wavelengths` property always returns None for
+    this backend. That means ScanManager's eager OESStore init (passing
+    spectrometer.wavelengths at construction so a failed first scan
+    point can't crash the whole scan — see scan_manager.py and
+    oes_store.py's class docstring) silently has no effect if
+    oes.backend: oceandirect is ever selected; OESStore falls back to
+    its old lazy-init-on-first-write behavior instead. Worth revisiting
+    once this backend is real.
     """
 
     def __init__(self, integration_time_us: int = 20_000, num_averages: int = 1,

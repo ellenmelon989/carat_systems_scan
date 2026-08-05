@@ -55,10 +55,15 @@ Config keys (under motion:)
                              # visibly moves the mirror down) -- a wiring/mounting-orientation
                              # fact, found by jogging and observing which way is which.
                              # Kept separate from steps_per_mm_x/y's own sign on purpose:
-                             # calibrate_steps_per_mm() (scan/calibrate_scan_area.py) always
+                             # the on-site calibration procedure above (step 4:
+                             # steps_per_mm_x = commanded_steps / measured_mm) always
                              # computes and writes a POSITIVE steps_per_mm, so encoding
                              # direction as a negative steps_per_mm would get silently
                              # un-flipped by the next on-site steps_per_mm recalibration.
+                             # (scan/calibrate_scan_area.py's CLI flow is degree-first for the
+                             # CONEX-AGAP driver now and has no steps_per_mm code path at all --
+                             # this file's own --calibrate-x/-y procedure above is the only way
+                             # to set steps_per_mm_x/y.)
   hard_home: true           # true = drive to hard stop; false = zero-in-place
   home_steps: 100000        # steps to drive toward hard stop during homing
   home_velocity: 200        # steps/s during homing (slow to avoid crash)
@@ -173,14 +178,18 @@ class NewportPicomotorController(MotionController):
         # operator calls positive (jog Up = +Y, jog Right = +X), or the
         # opposite?" This is deliberately a SEPARATE flag from
         # steps_per_mm_x/y's own sign, not encoded as a negative
-        # steps_per_mm value, because calibrate_steps_per_mm() in
-        # scan/calibrate_scan_area.py always computes and writes a
-        # POSITIVE steps_per_mm (steps_left_right / true_x_mm, both
-        # magnitudes) -- any future on-site steps_per_mm recalibration
-        # would silently flip a negative steps_per_mm back to positive
-        # and undo the direction fix with no indication why the mount
-        # started jogging backwards again. Keeping direction here instead
-        # means it survives every future steps_per_mm recalibration.
+        # steps_per_mm value, because this driver's own on-site
+        # calibration procedure (--calibrate-x/-y, see module docstring)
+        # always computes and writes a POSITIVE steps_per_mm
+        # (commanded_steps / measured_mm, both magnitudes) -- any future
+        # on-site steps_per_mm recalibration would silently flip a
+        # negative steps_per_mm back to positive and undo the direction
+        # fix with no indication why the mount started jogging backwards
+        # again. Keeping direction here instead means it survives every
+        # future steps_per_mm recalibration. (Note: scan/calibrate_scan_area.py's
+        # CLI flow has no steps_per_mm code path at all anymore -- it's
+        # degree-first for the CONEX-AGAP driver, unrelated to this 8742
+        # driver's own calibration above.)
         # self._eff_steps_per_mm_x/y (below) is what move_to()/
         # get_position() actually use for mm<->step conversion --
         # self._steps_per_mm_x/y itself stays the plain, always-positive,

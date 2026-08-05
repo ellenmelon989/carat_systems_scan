@@ -169,7 +169,12 @@ error_policy:
   on_failure: nan_and_flag   # nan_and_flag | abort
 
 output:
-  base_dir: ./scan_data
+  base_dir: ./scan_data       # PARENT dir -- ScanManager auto-appends a
+                               # scan_<YYYYMMDD_HHMMSS> subfolder per run
+                               # (see resolve_run_dir() in data_logger.py),
+                               # so this value itself never changes between
+                               # runs and every scan still gets its own
+                               # dated, non-colliding output directory.
   spectra_subdir: spectra
   summary_csv: scan_summary.csv
   metadata_file: metadata.yaml

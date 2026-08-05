@@ -28,6 +28,23 @@ class SpectrumReading:
 class SpectrometerReader:
     """Base interface. All backends implement read() and set_integration_time()."""
 
+    @property
+    def wavelengths(self) -> Optional[np.ndarray]:
+        """
+        The device's wavelength calibration array, if known.
+
+        Every backend sets self._wavelengths once at __init__/connect
+        time (pyseabreeze/oceandirect from the hardware, mock from
+        wavelength_range_nm) -- independent of whether any read() has
+        succeeded. Callers (ScanManager) use this to pre-size OESStore
+        before the scan's first point is measured, so a first-point read
+        or motion failure doesn't crash the whole scan for lack of a
+        wavelength array to size the HDF5 file with. None if the reader
+        never connected (e.g. pyseabreeze/oceandirect init failed) --
+        there's no calibration to fall back on in that case.
+        """
+        return getattr(self, "_wavelengths", None)
+
     def read(self) -> SpectrumReading:
         raise NotImplementedError
 

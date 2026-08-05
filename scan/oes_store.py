@@ -8,7 +8,9 @@ HDF5 schema
 -----------
   /x_mm           (nx,)              mm, spatial grid x coords
   /y_mm           (ny,)              mm, spatial grid y coords
-  /wavelength_nm  (nλ,)              nm, initialized on first write
+  /wavelength_nm  (nλ,)              nm, sized from the wavelengths given
+                                       at construction (or on first write
+                                       if omitted there — see class docstring)
   /intensity      (nx, ny, npass, nλ) float32, NaN until written
   /ir_temp_c      (nx, ny, npass)    float32, NaN until written
   /ir_emissivity  (nx, ny, npass)    float32, NaN until written (last-poll
@@ -37,9 +39,11 @@ immediately — a crashed scan leaves all completed points intact.
 
 Typical usage
 -------------
-    # 1. At scan start (n_passes from scan.passes in config.yaml)
+    # 1. At scan start (n_passes from scan.passes in config.yaml; pass
+    #    wavelengths up front whenever known, e.g. reader.wavelengths,
+    #    so a failed first point can't crash the whole scan)
     store = OESStore("scan_data/oes.h5", x_coords_mm=xs, y_coords_mm=ys,
-                      n_passes=3)
+                      n_passes=3, wavelengths=reader.wavelengths)
 
     # 2. Per point (ix/iy are 0-based grid indices, not mm values;
     #    pass_id is the 0-based index of which full-grid pass this is)
@@ -81,12 +85,22 @@ class OESStore:
     """
     Crash-safe HDF5 writer for 2D spatial OES scans.
 
-    Wavelengths are not required at construction — the file is created
-    (and the wavelength/intensity datasets are pre-allocated) on the
-    first call to write_point() that supplies wavelengths.
+    Wavelengths should be supplied at construction whenever they're known
+    upfront (see `wavelengths` param below) so the file is fully
+    pre-allocated before the scan's first point is ever measured. If
+    omitted, the file is instead created lazily on the first call to
+    write_point() that supplies wavelengths -- but that means a failed
+    *first* point (motion fault or OES read error, both of which pass
+    wavelengths=None) raises ValueError before the store has ever been
+    initialized, aborting the whole scan over a single-point hiccup. See
+    scan_manager.py's ScanManager.__init__, which passes
+    spectrometer.wavelengths (the reader's calibration array, set at
+    reader construction/connection time independent of any read()
+    succeeding) to avoid exactly this.
     """
 
-    def __init__(self, path: str, x_coords_mm, y_coords_mm, n_passes: int = 1):
+    def __init__(self, path: str, x_coords_mm, y_coords_mm, n_passes: int = 1,
+                 wavelengths=None):
         """
         Parameters
         ----------
@@ -101,6 +115,14 @@ class OESStore:
             in config.yaml). Must be known upfront so the pass axis can
             be pre-allocated like every other dimension here — defaults
             to 1 (single pass) for callers that don't care about repeats.
+        wavelengths : array-like, optional
+            The spectrometer's wavelength calibration (nm), if already
+            known (e.g. reader.wavelengths right after it connects).
+            When given, the HDF5 file is created and every dataset
+            pre-allocated immediately, so a failed first scan point no
+            longer crashes the whole scan for lack of a sizing reference
+            (see class docstring). When omitted, falls back to the old
+            lazy-init-on-first-successful-write_point() behavior.
         """
         self.path = path
         self.x_coords = np.asarray(x_coords_mm, dtype="float32")
@@ -109,23 +131,26 @@ class OESStore:
         self._initialized = False
 
         # Loud, not silent: _initialize() below opens this path with
-        # h5py.File(path, "w") on the first write_point() call -- "w" mode
-        # TRUNCATES an existing file. Reusing output.base_dir from an
-        # earlier scan (e.g. the default ./scan_data left unchanged
-        # between runs) means the PREVIOUS scan's entire oes.h5 is
-        # silently destroyed the moment this scan writes its first point,
-        # with no prompt and no backup. Opposite failure mode from
-        # DataLogger's summary CSV (which appends instead -- see that
-        # class's own warning), but the same root cause: nothing in this
-        # codebase checks for or timestamps a reused output directory.
+        # h5py.File(path, "w") -- "w" mode TRUNCATES an existing file.
+        # Reusing output.base_dir from an earlier scan (e.g. the default
+        # ./scan_data left unchanged between runs) means the PREVIOUS
+        # scan's entire oes.h5 is silently destroyed the moment this
+        # store initializes, with no prompt and no backup. Opposite
+        # failure mode from DataLogger's summary CSV (which appends
+        # instead -- see that class's own warning), but the same root
+        # cause: nothing in this codebase checks for or timestamps a
+        # reused output directory.
         if os.path.exists(self.path):
             print(
                 f"WARNING: {self.path} already exists and will be OVERWRITTEN "
-                "(replaced, not appended) on the first write_point() call. If this "
-                "is a different scan than whatever wrote the existing file, point "
-                "a different output.base_dir / output.oes_hdf5 at it first, or "
-                "move/rename the existing file now."
+                "(replaced, not appended) as soon as this store initializes. If "
+                "this is a different scan than whatever wrote the existing file, "
+                "point a different output.base_dir / output.oes_hdf5 at it "
+                "first, or move/rename the existing file now."
             )
+
+        if wavelengths is not None:
+            self._initialize(np.asarray(wavelengths))
 
     # ------------------------------------------------------------------
     # Internal
