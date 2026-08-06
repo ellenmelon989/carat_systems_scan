@@ -716,13 +716,32 @@ class ConexAGAPController(MotionController):
         ~1 degree range the limits are already expressed in, can't
         overshoot by 3-5 orders of magnitude the way an unknown mm ratio
         can.
+
+        BUGFIX 2026-08-06: target was previously computed as
+        self._origin_u/_v + dx_deg/dy_deg -- i.e. an ABSOLUTE target
+        measured from the origin, not an actual relative move from
+        wherever the stage currently is, despite the name/docstring.
+        Effect: every jog snapped to a fixed spot exactly dx_deg/dy_deg
+        from the origin regardless of current position -- repeated presses
+        in the same direction were no-ops (same target, already there),
+        and a jog on ONE axis silently reset the OTHER axis back to zero-
+        from-origin. clearance_check()'s "+test, -test" pairs, which are
+        supposed to net to zero displacement, were actually jumping
+        between +test and -test -- double the intended step -- which is a
+        plausible cause of a jog unexpectedly reaching a real travel
+        limit. Now reads the LIVE current position (same pattern as
+        jog_axis_relative() below) and adds the delta to THAT, matching
+        what "relative move" actually means. See MEMORY
+        carat_scanner_2026-08-06_calibration_jog_absolute_not_relative.
         """
         if not self._homed:
             raise RuntimeError("Must call home() before calibration_jog_deg().")
-        target_u = self._origin_u + dx_deg * self._sign_x
-        target_v = self._origin_v + dy_deg * self._sign_y
         self._require_motion_permission("calibration jog (deg)", require_calibration=False)
         self._assert_current_positions_within_limits("calibration jog (deg)")
+        current_u = self._get_axis_position(self._axis_x)
+        current_v = self._get_axis_position(self._axis_y)
+        target_u = current_u + dx_deg * self._sign_x
+        target_v = current_v + dy_deg * self._sign_y
         self._validate_axis_target(self._axis_x, target_u)
         self._validate_axis_target(self._axis_y, target_v)
         self._ensure_enabled()

@@ -64,6 +64,35 @@ class FakeConexSerial:
         self.closed = True
 
 
+class FakeConexSerialWithMotion(FakeConexSerial):
+    """Like FakeConexSerial, but PA<axis><target> commands actually update
+    position_u/position_v -- i.e. simulates the stage really reaching a
+    commanded target, so a later TP query (or a later jog's "current
+    position" read) reflects the PREVIOUS jog. FakeConexSerial's position
+    is otherwise static regardless of what's commanded, which is fine for
+    tests that only ever jog once from a freshly-homed origin, but can't
+    distinguish "jog relative to current position" from "jog relative to
+    origin" across a SECOND jog -- see
+    test_calibration_jog_deg_is_relative_to_current_position_not_origin,
+    the regression test for the 2026-08-06
+    calibration_jog_deg_absolute_not_relative bug this exists to catch.
+    """
+
+    def write(self, payload):
+        command = payload.decode("ascii").strip()
+        if command.startswith("1PAU"):
+            self.position_u = float(command[len("1PAU"):])
+            self.commands.append(command)
+            self._response = b""
+            return len(payload)
+        if command.startswith("1PAV"):
+            self.position_v = float(command[len("1PAV"):])
+            self.commands.append(command)
+            self._response = b""
+            return len(payload)
+        return super().write(payload)
+
+
 class FakeRecoverySerial(FakeConexSerial):
     def __init__(self):
         super().__init__(position_v=-1.477)
@@ -238,6 +267,35 @@ class ConexSafetyTests(unittest.TestCase):
         with self.assertRaisesRegex(MotionFault, "outside stored limits"):
             controller.calibration_jog_deg(dx_deg=5.0)
         self.assert_no_motion_command(fake)
+
+    def test_calibration_jog_deg_is_relative_to_current_position_not_origin(self):
+        # Regression test for the 2026-08-06 bug: calibration_jog_deg()
+        # computed target = origin + delta instead of target = current +
+        # delta. Symptom in the field: pressing "jog" repeatedly in the
+        # same direction looked like it always moved to a fixed spot
+        # (jog_step_deg away from the reference mark) instead of moving
+        # further each press, and jogging one axis silently snapped the
+        # OTHER axis back to zero-from-origin.
+        fake = FakeConexSerialWithMotion()
+        controller = self.make_controller(fake, motion_enabled=True)
+        controller.home()  # origin = current live position = (0.0, 0.0)
+
+        controller.calibration_jog_deg(dx_deg=0.05)
+        self.assertIn("1PAU0.050000", fake.commands)
+
+        # Second jog, same direction, same step: a REAL relative jog must
+        # land at 0.10 (0.05 current + 0.05 new), not repeat 0.05 (which
+        # is what "origin + delta" would send every time).
+        controller.calibration_jog_deg(dx_deg=0.05)
+        self.assertIn("1PAU0.100000", fake.commands)
+
+        # A jog on the OTHER axis (dx_deg defaults to 0.0) must NOT reset
+        # axis U back toward the origin -- it should resend U's current
+        # value (0.10), not origin + 0 = 0.0.
+        controller.calibration_jog_deg(dy_deg=0.02)
+        self.assertIn("1PAU0.100000", fake.commands)
+        self.assertIn("1PAV0.020000", fake.commands)
+        self.assertNotIn("1PAU0.000000", fake.commands)
 
     def test_get_position_deg_applies_axis_mapping_and_invert_not_ratio(self):
         # invert_y=True, and a deg_per_mm_y that would badly distort an mm
