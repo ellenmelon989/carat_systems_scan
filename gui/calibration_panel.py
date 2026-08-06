@@ -46,6 +46,7 @@ from scan.calibrate_scan_area import (
     JOG_STEP_DEFAULT_DEG,
     JOG_STEP_MAX_DEG,
     JOG_STEP_MIN_DEG,
+    MIN_EDGE_SEPARATION_DEG,
     calibrate_deg_per_mm,
     compute_area,
     compute_radius_mm,
@@ -500,6 +501,33 @@ class CalibrationPanel(ttk.Frame):
             return
         if true_x_mm <= 0 or true_y_mm <= 0:
             messagebox.showerror("Invalid values", "Distances must be positive.")
+            return
+
+        # Guard BEFORE dividing -- see MIN_EDGE_SEPARATION_DEG
+        # for the full rationale: a near-zero measured span here means an
+        # edge (or the reference mark) was confirmed without actually
+        # jogging, and left unguarded produces a near-zero deg_per_mm that
+        # then makes edges_deg_to_mm() below divide BY it and crash with an
+        # unhandled ZeroDivisionError -- which is what this replaces.
+        if self._deg_lr < MIN_EDGE_SEPARATION_DEG:
+            messagebox.showerror(
+                "No X motion measured",
+                f"Left/right edges are only {self._deg_lr:.4f} deg apart -- "
+                "within jog noise of zero. It looks like the X jog was "
+                "skipped. Go back and actually jog to the left and right "
+                "edges (watch the Position readout change) before "
+                "confirming.",
+            )
+            return
+        if self._deg_bt < MIN_EDGE_SEPARATION_DEG:
+            messagebox.showerror(
+                "No Y motion measured",
+                f"Top/bottom edges are only {self._deg_bt:.4f} deg apart -- "
+                "within jog noise of zero. It looks like the Y jog was "
+                "skipped. Go back and actually jog to the top and bottom "
+                "edges (watch the Position readout change) before "
+                "confirming.",
+            )
             return
 
         current_x = self.config["motion"].get("deg_per_mm_x")

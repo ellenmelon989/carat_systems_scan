@@ -125,6 +125,17 @@ JOG_STEP_DEFAULT_DEG = 0.05
 JOG_STEP_MIN_DEG = 0.005
 JOG_STEP_MAX_DEG = 0.3
 
+# Minimum degree separation between a pair of opposite edges (left/right or
+# top/bottom) for calibrate_deg_per_mm() to trust it as a real measurement.
+# Below this, treat it as "the operator didn't actually jog between the two
+# edges" rather than a genuine near-zero span -- dividing a true distance by
+# ~0 produces a ~0 deg_per_mm, which then makes edges_deg_to_mm() divide BY
+# that ~0 and raise an unhandled ZeroDivisionError several steps later, far
+# from the actual mistake. Set well below JOG_STEP_MIN_DEG so one real jog
+# step of any size still passes. See MEMORY
+# carat_scanner_2026-08-06_calibration_zero_separation_crash.
+MIN_EDGE_SEPARATION_DEG = 0.001
+
 # Decimal precision write_results() persists x_range_mm/y_range_mm/
 # wafer_center_mm to in config.yaml. compute_area()'s output is rounded
 # to this SAME precision in main(), immediately and once, before it's
@@ -463,6 +474,30 @@ def calibrate_deg_per_mm(edges_deg: dict, config: dict):
 
     true_x_mm = float(true_x_raw)
     true_y_mm = float(true_y_raw)
+
+    # Guard BEFORE dividing: a near-zero measured span means left/right (or
+    # top/bottom) were confirmed at essentially the same spot -- almost
+    # always a jog that was skipped, not a real near-zero wafer dimension.
+    # Left unguarded, this produces a near-zero deg_per_mm that then makes
+    # edges_deg_to_mm() divide BY it and crash with an unhandled
+    # ZeroDivisionError -- confusing because the crash lands several steps
+    # after, and after any log of, the actual mistake.
+    if deg_left_right < MIN_EDGE_SEPARATION_DEG:
+        raise ValueError(
+            f"Left/right edges are only {deg_left_right:.4f} deg apart -- "
+            "that's within jog noise of zero, so this looks like the X jog "
+            "was skipped rather than a real measurement. Re-run and "
+            "actually jog to each edge (watch the printed position change) "
+            "before confirming."
+        )
+    if deg_bottom_top < MIN_EDGE_SEPARATION_DEG:
+        raise ValueError(
+            f"Top/bottom edges are only {deg_bottom_top:.4f} deg apart -- "
+            "that's within jog noise of zero, so this looks like the Y jog "
+            "was skipped rather than a real measurement. Re-run and "
+            "actually jog to each edge (watch the printed position change) "
+            "before confirming."
+        )
 
     new_deg_per_mm_x = deg_left_right / true_x_mm
     new_deg_per_mm_y = deg_bottom_top / true_y_mm
