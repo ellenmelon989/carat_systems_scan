@@ -760,6 +760,21 @@ def write_results(config_path: Path, results: dict):
         _try(_patch_scalar, "deg_per_mm_y", "deg_per_mm_y", f"{results['deg_per_mm_y']:.6f}")
         _try(_patch_or_insert_scalar, "calibration_date", "calibration_date",
              f'"{date.today().isoformat()}"', "deg_per_mm_y")
+        # BUGFIX 2026-08-06: this branch only runs when deg_per_mm_x/y were
+        # ACTUALLY just re-measured this session (calibrate_deg_per_mm()'s
+        # "recalibrated" path, not the "skip, reuse existing config" path --
+        # see main()'s `if deg_per_mm_result["recalibrated"]:` guard above,
+        # which is the only way results ever gets a "deg_per_mm_x" key). That
+        # is EXACTLY the condition ConexAGAPController's calibration_confirmed
+        # interlock exists to gate on (see its config-key comment: "Set true
+        # only after deg_per_mm_x/y ... are real measured CONEX values") --
+        # but nothing was ever writing it back to true. Previously this left
+        # the interlock permanently false after a real, successful
+        # calibration, silently blocking every subsequent move_to() with
+        # "calibration_confirmed is false" until an operator hand-edited
+        # config.yaml. See MEMORY
+        # carat_scanner_2026-08-06_calibration_confirmed_not_written.
+        _try(_patch_scalar, "calibration_confirmed", "calibration_confirmed", "true")
 
     if "home_steps" in results:
         _try(_patch_or_insert_scalar, "home_steps", "home_steps",
