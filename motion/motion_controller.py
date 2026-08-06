@@ -131,16 +131,12 @@ class MotionController(ABC):
 
         Default implementation is identical to jog(): most controllers gate
         motion the same way regardless of calibration state, so this is a
-        no-op distinction for them. ConexAGAPController overrides it: that
-        driver's ordinary move_to() (and therefore jog()) additionally
-        requires motion.calibration_confirmed, a flag that can only honestly
-        be set AFTER this same jog-to-the-4-edges workflow has produced real
-        measured deg/mm numbers. Routing the calibration workflow through
-        calibration_jog() instead of jog() breaks that chicken-and-egg: it
-        still requires motion.motion_enabled and still validates against
-        live controller limits, it just doesn't require calibration to
-        already be confirmed. See ConexAGAPController.calibration_jog()'s
-        docstring for the full rationale.
+        no-op distinction for them. ConexAGAPController overrides it and
+        keeps it as a distinct, relative-move-convenience method that the
+        calibration workflow already calls by name -- as of 2026-08-06 it
+        is guarded identically to move_to() (the calibration_confirmed
+        interlock that used to distinguish them was removed; see
+        ConexAGAPController._require_motion_permission()'s docstring).
         """
         self.jog(dx_mm=dx_mm, dy_mm=dy_mm)
 

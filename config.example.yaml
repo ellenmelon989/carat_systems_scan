@@ -51,8 +51,10 @@ motion:
                                # matters if reconfigured for RS-485).
   motion_enabled: false       # FAIL-CLOSED operator interlock. Leave false
                                # during connection checks and axis recovery.
-  calibration_confirmed: false # Set true only after deg_per_mm_x/y below are
-                                # real measured CONEX values, not the placeholder.
+  calibration_confirmed: false # INFORMATIONAL ONLY as of 2026-08-06 -- nothing
+                                # reads this. move_to() no longer requires it;
+                                # a scan can run with deg_per_mm_x/y still at
+                                # the placeholder if you choose to.
   axis_x: "U"                 # which CONEX axis LETTER ('U' or 'V') drives
   axis_y: "V"                 # scan-grid X/Y -- CONFIRM by jogging each letter
                                # individually and watching the mirror, same as

@@ -132,7 +132,10 @@ Config keys (under motion:)
   controller_address: 1      # CONEX-AGAP factory default over USB. Only
                               # change if it's been reconfigured for RS-485.
   motion_enabled: false      # explicit operator interlock; fail-closed
-  calibration_confirmed: false # true only after measured CONEX deg/mm
+  calibration_confirmed: false # INFORMATIONAL ONLY as of 2026-08-06 --
+                              # nothing reads this anymore. move_to() no
+                              # longer requires it; see
+                              # _require_motion_permission()'s docstring.
   axis_x: "U"                # which CONEX axis letter ('U' or 'V') drives
   axis_y: "V"                # scan-grid X / Y -- CONFIRM by jogging, don't
                               # assume U=X.
@@ -219,7 +222,6 @@ _DEFAULT_MOVE_TIMEOUT = 30.0
 _DEFAULT_STOP_CONFIRM_TIMEOUT = 10.0
 _DEFAULT_SERIAL_TIMEOUT = 2.0      # per-read timeout for the serial port itself
 _DEFAULT_MOTION_ENABLED = False
-_DEFAULT_CALIBRATION_CONFIRMED = False
 _STOP_CONFIRM_POLL_S = 0.05
 _MOVE_POLL_S = 0.05
 _SETTLE_CONFIRM_DELAY_S = 0.1  # mirrors real_newport_motion.py's double-read
@@ -448,18 +450,25 @@ class ConexAGAPController(MotionController):
         self._eff_deg_per_mm_y = self._deg_per_mm_y * self._sign_y
 
         self._hard_home = bool(motion_cfg.get("hard_home", _DEFAULT_HARD_HOME))
-        # Two independent fail-closed interlocks.  motion_enabled is the
-        # operator's deliberate permission to command hardware.  The separate
-        # calibration_confirmed flag prevents an old 8742 steps/mm value (or
-        # this driver's 500 placeholder) from becoming a CONEX degrees/mm
-        # command merely because motion was enabled.
+        # Fail-closed interlock: motion_enabled is the operator's deliberate
+        # permission to command hardware at all.
+        #
+        # REMOVED 2026-08-06: this used to be TWO interlocks -- motion_enabled,
+        # plus a separate calibration_confirmed flag that additionally blocked
+        # move_to() (real scan moves) unless deg_per_mm_x/y had been freshly
+        # measured this session, specifically to stop an old/placeholder ratio
+        # from silently becoming a real scan move. Removed per explicit
+        # operator decision: a scan must be able to run whether or not
+        # calibration has been confirmed, using whatever deg_per_mm_x/y is
+        # currently in config.yaml (measured or still the placeholder). The
+        # calibration workflow itself (calibrate_scan_area.py /
+        # gui/calibration_panel.py) is UNCHANGED and still measures + writes
+        # real deg_per_mm_x/y when it's run -- it simply no longer gates
+        # anything. motion.calibration_confirmed in config.yaml is now
+        # informational only; nothing reads it. See MEMORY
+        # carat_scanner_2026-08-06_calibration_confirmed_guard_removed.
         self._motion_enabled = bool(
             motion_cfg.get("motion_enabled", _DEFAULT_MOTION_ENABLED)
-        )
-        self._calibration_confirmed = bool(
-            motion_cfg.get(
-                "calibration_confirmed", _DEFAULT_CALIBRATION_CONFIRMED
-            )
         )
         self._move_timeout = float(motion_cfg.get("move_timeout_s", _DEFAULT_MOVE_TIMEOUT))
         self._stop_confirm_timeout = float(
@@ -570,7 +579,7 @@ class ConexAGAPController(MotionController):
                           8742 driver.
         """
         if self._hard_home:
-            self._require_motion_permission("hard home", require_calibration=False)
+            self._require_motion_permission("hard home")
             self._assert_current_positions_within_limits("hard home")
             self._validate_axis_target(self._axis_x, 0.0)
             self._validate_axis_target(self._axis_y, 0.0)
@@ -656,32 +665,34 @@ class ConexAGAPController(MotionController):
         PA commands. Returns immediately; call wait_for_settle() to
         block.
 
-        Requires motion.calibration_confirmed -- this is the path
-        scan_manager.py uses for real scan points, and deg_per_mm_x/y
-        must be real measured values by the time anything moves this
-        way. See calibration_jog_deg() for how those numbers get
-        MEASURED in the first place, before they can honestly be
-        confirmed -- it deliberately never goes through this mm
-        conversion at all.
+        CHANGED 2026-08-06: no longer requires motion.calibration_confirmed
+        -- see _require_motion_permission()'s docstring for the removal
+        rationale. This is the path scan_manager.py uses for real scan
+        points; it converts using whatever deg_per_mm_x/y currently is in
+        config.yaml, measured or still the placeholder, and the caller is
+        responsible for having calibrated on-site if real spatial accuracy
+        matters for this run.
         """
         if not self._homed:
             raise RuntimeError("Must call home() before move_to().")
-        self._move_to_impl(x_mm, y_mm, require_calibration=True)
+        self._move_to_impl(x_mm, y_mm, label="move_to")
 
     def calibration_jog(self, dx_mm: float = 0.0, dy_mm: float = 0.0):
         """
-        Relative move by (dx_mm, dy_mm), for use ONLY by the interactive
+        Relative move by (dx_mm, dy_mm), for use by the interactive
         calibration workflow (calibrate_scan_area.py / gui/calibration_panel.py),
-        and only once deg_per_mm_x/y are already at least roughly known.
+        once deg_per_mm_x/y are already at least roughly known.
 
         Overrides MotionController.calibration_jog() -- see its docstring
-        for the full chicken-and-egg rationale. This still requires
-        motion.motion_enabled and still validates the computed target
-        against the controller's live SL/SR limits (via _move_to_impl,
-        the same code path move_to() uses); it just passes
-        require_calibration=False, since move_to()'s ordinary
-        calibration_confirmed gate would otherwise block the only
-        workflow that can honestly satisfy it.
+        for the chicken-and-egg rationale this was originally written for.
+        Still requires motion.motion_enabled and still validates the
+        computed target against the controller's live SL/SR limits (via
+        _move_to_impl, the same code path move_to() uses) -- as of
+        2026-08-06 that's now identical guarding to move_to() itself (the
+        calibration_confirmed distinction between them was removed; see
+        _require_motion_permission()). Kept as a separate method for its
+        relative-move convenience and because the calibration workflow
+        already calls it by name.
 
         Prefer calibration_jog_deg() for the FIRST calibration on a new
         setup, where deg_per_mm_x/y aren't known yet at all -- this mm
@@ -694,7 +705,7 @@ class ConexAGAPController(MotionController):
         if not self._homed:
             raise RuntimeError("Must call home() before calibration_jog().")
         x, y = self.get_position()
-        self._move_to_impl(x + dx_mm, y + dy_mm, require_calibration=False)
+        self._move_to_impl(x + dx_mm, y + dy_mm, label="calibration jog")
         self.wait_for_settle(0.0)
 
     def calibration_jog_deg(self, dx_deg: float = 0.0, dy_deg: float = 0.0):
@@ -709,13 +720,12 @@ class ConexAGAPController(MotionController):
         deg_per_mm_x/y aren't known yet (a fresh install, or a mount
         that's been physically moved) -- see get_position_deg() and the
         module docstring's CONFIG KEYS section. Same guards as
-        calibration_jog(): requires motion.motion_enabled, never requires
-        motion.calibration_confirmed, and every target is validated
-        against the controller's live SL/SR limits before anything is
-        sent -- a jog specified directly in degrees, bounded by the same
-        ~1 degree range the limits are already expressed in, can't
-        overshoot by 3-5 orders of magnitude the way an unknown mm ratio
-        can.
+        calibration_jog(): requires motion.motion_enabled, and every
+        target is validated against the controller's live SL/SR limits
+        before anything is sent -- a jog specified directly in degrees,
+        bounded by the same ~1 degree range the limits are already
+        expressed in, can't overshoot by 3-5 orders of magnitude the way
+        an unknown mm ratio can.
 
         BUGFIX 2026-08-06: target was previously computed as
         self._origin_u/_v + dx_deg/dy_deg -- i.e. an ABSOLUTE target
@@ -736,7 +746,7 @@ class ConexAGAPController(MotionController):
         """
         if not self._homed:
             raise RuntimeError("Must call home() before calibration_jog_deg().")
-        self._require_motion_permission("calibration jog (deg)", require_calibration=False)
+        self._require_motion_permission("calibration jog (deg)")
         self._assert_current_positions_within_limits("calibration jog (deg)")
         current_u = self._get_axis_position(self._axis_x)
         current_v = self._get_axis_position(self._axis_y)
@@ -791,23 +801,22 @@ class ConexAGAPController(MotionController):
             self._get_axis_position(self._axis_y),
         )
 
-    def _move_to_impl(self, x_mm: float, y_mm: float, require_calibration: bool):
+    def _move_to_impl(self, x_mm: float, y_mm: float, label: str):
         """Shared absolute-move body for move_to() and calibration_jog().
 
-        require_calibration distinguishes a real scan move (must have
-        motion.calibration_confirmed) from a calibration-workflow jog
-        (must not, or the workflow that sets that flag could never run).
-        Every other guard -- motion_enabled, live-position-in-limits,
-        per-target-in-limits, validate-both-before-sending-either -- is
-        identical for both callers.
+        label is used only for error-message context (e.g. "move_to" vs
+        "calibration jog") -- both callers are guarded identically:
+        motion_enabled, live-position-in-limits, per-target-in-limits,
+        validate-both-before-sending-either.
+
+        CHANGED 2026-08-06: previously took a require_calibration bool
+        that also gated move_to() behind motion.calibration_confirmed
+        (calibration_jog() passed False to exempt itself). That gate is
+        removed -- see _require_motion_permission()'s docstring -- so
+        this parameter is now just a label, not a permission switch.
         """
-        self._require_motion_permission(
-            "move_to" if require_calibration else "calibration jog",
-            require_calibration=require_calibration,
-        )
-        self._assert_current_positions_within_limits(
-            "move_to" if require_calibration else "calibration jog"
-        )
+        self._require_motion_permission(label)
+        self._assert_current_positions_within_limits(label)
 
         target_u = self._origin_u + x_mm * self._eff_deg_per_mm_x
         target_v = self._origin_v + y_mm * self._eff_deg_per_mm_y
@@ -847,9 +856,7 @@ class ConexAGAPController(MotionController):
         if delta == 0.0:
             raise ValueError("relative jog must be non-zero")
 
-        self._require_motion_permission(
-            f"relative jog on axis {axis}", require_calibration=False
-        )
+        self._require_motion_permission(f"relative jog on axis {axis}")
         self._assert_current_positions_within_limits(
             f"relative jog on axis {axis}"
         )
@@ -1028,21 +1035,25 @@ class ConexAGAPController(MotionController):
                 f"{positive:.6f}] deg. No motion was commanded."
             )
 
-    def _require_motion_permission(
-        self, operation: str, require_calibration: bool
-    ):
-        """Require explicit config interlocks before any normal motion."""
+    def _require_motion_permission(self, operation: str):
+        """Require explicit motion.motion_enabled before any normal motion.
+
+        CHANGED 2026-08-06: this used to also require
+        motion.calibration_confirmed for real scan moves (move_to()),
+        specifically to stop an old/placeholder deg_per_mm_x/y ratio from
+        silently becoming a real scan move. Removed per explicit operator
+        decision -- a scan must be able to run whether or not calibration
+        has been confirmed. The calibration workflow itself
+        (calibrate_scan_area.py / gui/calibration_panel.py) is unchanged
+        and still measures + writes real deg_per_mm_x/y when run; it just
+        no longer gates anything. motion.calibration_confirmed in
+        config.yaml is now informational only. See MEMORY
+        carat_scanner_2026-08-06_calibration_confirmed_guard_removed.
+        """
         if not self._motion_enabled:
             raise MotionFault(
                 f"CONEX {operation} blocked: set motion.motion_enabled: true "
                 "only after the hardware position and optical path are safe."
-            )
-        if require_calibration and not self._calibration_confirmed:
-            raise MotionFault(
-                f"CONEX {operation} blocked: motion.calibration_confirmed "
-                "is false. Set deg_per_mm_x/y to measured values (see "
-                "calibration_jog_deg()/get_position_deg()) before enabling "
-                "scan moves."
             )
 
     def _get_state(self) -> str:
@@ -1229,7 +1240,6 @@ if __name__ == "__main__":
             "axis_y": args.axis_y,
             "hard_home": False,   # soft home for smoke test -- safer
             "motion_enabled": args.allow_motion,
-            "calibration_confirmed": False,
         }
     }
 

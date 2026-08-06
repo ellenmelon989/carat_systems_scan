@@ -131,7 +131,6 @@ def config(**motion_overrides):
         "deg_per_mm_x": 0.01,
         "deg_per_mm_y": 0.01,
         "motion_enabled": False,
-        "calibration_confirmed": False,
         "hard_home": False,
     }
     motion.update(motion_overrides)
@@ -165,20 +164,27 @@ class ConexSafetyTests(unittest.TestCase):
             controller.move_to(1.0, 1.0)
         self.assert_no_motion_command(fake)
 
-    def test_move_requires_confirmed_calibration(self):
+    def test_move_succeeds_without_calibration_confirmed(self):
+        # CHANGED 2026-08-06: move_to() used to require
+        # motion.calibration_confirmed and raise MotionFault otherwise (see
+        # git history / MEMORY carat_scanner_2026-08-06_calibration_confirmed_guard_removed
+        # for the removal rationale). Explicit operator decision: a scan
+        # must be able to run whether or not calibration has been
+        # confirmed, using whatever deg_per_mm_x/y is currently configured
+        # (measured or still the placeholder). calibration_confirmed isn't
+        # even passed here -- proving nothing reads it anymore.
         fake = FakeConexSerial()
         controller = self.make_controller(fake, motion_enabled=True)
         controller.home()
-        with self.assertRaisesRegex(MotionFault, "calibration_confirmed"):
-            controller.move_to(1.0, 1.0)
-        self.assert_no_motion_command(fake)
+        controller.move_to(1.0, 1.0)
+        self.assertIn("1PAU0.010000", fake.commands)
+        self.assertIn("1PAV0.010000", fake.commands)
 
     def test_both_targets_are_validated_before_either_axis_moves(self):
         fake = FakeConexSerial()
         controller = self.make_controller(
             fake,
             motion_enabled=True,
-            calibration_confirmed=True,
             deg_per_mm_x=1.0,
             deg_per_mm_y=0.01,
         )
@@ -189,9 +195,7 @@ class ConexSafetyTests(unittest.TestCase):
 
     def test_in_limit_confirmed_move_sends_both_targets(self):
         fake = FakeConexSerial()
-        controller = self.make_controller(
-            fake, motion_enabled=True, calibration_confirmed=True
-        )
+        controller = self.make_controller(fake, motion_enabled=True)
         controller.home()
         controller.move_to(10.0, 20.0)
         self.assertIn("1PAU0.100000", fake.commands)
@@ -206,15 +210,15 @@ class ConexSafetyTests(unittest.TestCase):
         self.assert_no_motion_command(fake)
 
     def test_calibration_jog_does_not_require_confirmed_calibration(self):
+        # Still true as of 2026-08-06, though now for a trivial reason:
+        # calibration_confirmed no longer gates ANYTHING (see
+        # test_move_succeeds_without_calibration_confirmed and MEMORY
+        # carat_scanner_2026-08-06_calibration_confirmed_guard_removed) --
+        # calibration_jog() was never more restricted than move_to() to
+        # begin with, so this just confirms it still isn't.
         fake = FakeConexSerial()
         controller = self.make_controller(fake, motion_enabled=True)
         controller.home()
-        # calibration_confirmed is still False here -- would block move_to()
-        # (see test_move_requires_confirmed_calibration). calibration_jog()
-        # must NOT require it: it's the jog loop that MEASURES
-        # deg_per_mm_x/y in the first place (gui/calibration_panel.py,
-        # calibrate_scan_area.py), before calibration_confirmed can honestly
-        # be set true.
         controller.calibration_jog(dx_mm=10.0, dy_mm=20.0)
         self.assertIn("1PAU0.100000", fake.commands)
         self.assertIn("1PAV0.200000", fake.commands)
