@@ -765,6 +765,32 @@ class ConexAGAPController(MotionController):
         v = self._get_axis_position(self._axis_y) - self._origin_v
         return (u * self._sign_x, v * self._sign_y)
 
+    def get_absolute_position_deg(self) -> tuple[float, float]:
+        """
+        Live X/Y position in RAW native degrees -- axis_x/axis_y letter
+        mapping applied (so "X" is still whichever CONEX letter is
+        configured as X), but WITHOUT subtracting the origin and WITHOUT
+        the invert_x/invert_y sign flip. This is deliberately the exact
+        same frame _validate_axis_target() checks against SL[a]/SR[a] in
+        (see calibration_jog_deg() -- target_u/target_v there are built
+        from this same raw _get_axis_position(), not from
+        get_position_deg()'s origin-relative value) -- so a value read
+        here can be compared directly against the SL/SR window printed
+        by tools/recover_conex_axis.py or probe_conex_connection() to
+        see exactly how much real room is left, independent of wherever
+        zero_here()/home() anchored the origin.
+
+        invert_x/invert_y is skipped here on purpose: it's a convention
+        for which direction operator-facing deltas move the mirror, not
+        a transform on an absolute position reading -- applying it would
+        make this number NOT match what _validate_axis_target() actually
+        checks, defeating the point.
+        """
+        return (
+            self._get_axis_position(self._axis_x),
+            self._get_axis_position(self._axis_y),
+        )
+
     def _move_to_impl(self, x_mm: float, y_mm: float, require_calibration: bool):
         """Shared absolute-move body for move_to() and calibration_jog().
 

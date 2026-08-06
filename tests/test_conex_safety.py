@@ -312,6 +312,27 @@ class ConexSafetyTests(unittest.TestCase):
         # v moved -0.05 from origin; invert_y flips the sign.
         self.assertAlmostEqual(y_deg, 0.05)
 
+    def test_absolute_position_ignores_origin_and_invert(self):
+        # get_absolute_position_deg() must report the exact raw TP value
+        # (the same frame _validate_axis_target() checks SL/SR against) --
+        # NOT origin-relative, and NOT invert-sign-flipped. Origin gets
+        # re-anchored away from (0, 0) via zero_here(), and invert_y=True
+        # would flip get_position_deg()'s sign for the SAME reading if
+        # this method reused that logic instead of bypassing it.
+        fake = FakeConexSerial(position_u=0.3, position_v=-0.2)
+        controller = self.make_controller(fake, motion_enabled=True, invert_y=True)
+        controller.zero_here()  # origin = (0.3, -0.2) -- get_position_deg() would read (0, 0) now
+        fake.position_u = 0.35
+        fake.position_v = -0.25
+
+        abs_x, abs_y = controller.get_absolute_position_deg()
+        self.assertAlmostEqual(abs_x, 0.35)
+        self.assertAlmostEqual(abs_y, -0.25)  # not sign-flipped, unlike get_position_deg()
+
+        rel_x, rel_y = controller.get_position_deg()
+        self.assertAlmostEqual(rel_x, 0.05)
+        self.assertAlmostEqual(rel_y, 0.05)  # origin-relative AND invert-flipped
+
     def test_raw_axis_jog_uses_live_position_not_stale_relative_target(self):
         fake = FakeConexSerial(position_u=0.2)
         controller = self.make_controller(fake, motion_enabled=True)

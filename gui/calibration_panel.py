@@ -296,8 +296,18 @@ class CalibrationPanel(ttk.Frame):
         if self.motion is None:
             self.pos_var.set("Position: --")
             return
-        x, y = self.motion.get_position_deg()
-        self.pos_var.set(f"Position: {x:.4f}, {y:.4f} deg")
+        # Shows the RAW absolute controller position (get_absolute_position_deg()),
+        # not the origin-relative one (get_position_deg()) -- deliberately, per
+        # 2026-08-06 operator report: a relative reading like "-0.38" gave no
+        # way to tell how close the mount actually is to its real hardware
+        # SL/SR limit, since that limit is checked in the absolute frame, not
+        # relative to wherever zero_here() last anchored the origin. This is
+        # the same raw value tools/recover_conex_axis.py's preflight prints
+        # and the same one calibration_jog_deg()'s target is validated
+        # against. See MotionController.get_absolute_position_deg()'s
+        # docstring and MEMORY carat_scanner_2026-08-06_gui_absolute_position_display.
+        x, y = self.motion.get_absolute_position_deg()
+        self.pos_var.set(f"Position (abs): {x:.4f}, {y:.4f} deg")
 
     def _start_position_poll(self):
         if self._position_poll_job is not None:

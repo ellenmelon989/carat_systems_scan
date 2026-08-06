@@ -176,6 +176,28 @@ class MotionController(ABC):
             "report position in -- use get_position() instead."
         )
 
+    def get_absolute_position_deg(self) -> tuple:
+        """
+        Live position in the controller's own native rotational unit
+        (degrees), WITHOUT subtracting the origin -- i.e. the exact raw
+        value the hardware's own software limits (SL/SR on the CONEX)
+        are expressed in and checked against. get_position_deg() is
+        relative to wherever zero_here()/home() last anchored the
+        origin, which is convenient for scan-grid math but can be
+        confusing when debugging an "outside stored limits" fault: a
+        small-looking relative delta can still push the RAW target past
+        an absolute hardware limit if the origin itself sits close to
+        that limit. This method exists so the operator can see that
+        raw number directly instead of inferring it. See MEMORY
+        carat_scanner_2026-08-06_gui_absolute_position_display.
+
+        No sensible default, same reasoning as get_position_deg().
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} has no native rotational unit to "
+            "report position in -- use get_position() instead."
+        )
+
 
 class MockMotionController(MotionController):
     """
