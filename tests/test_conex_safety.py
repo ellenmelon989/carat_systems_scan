@@ -1,6 +1,22 @@
 import unittest
 from unittest.mock import patch
 
+# --- repo-root import bootstrap -------------------------------------------
+# Needed to import the top-level `motion`/`tools` packages below. Running
+# this file directly (`python tests/test_conex_safety.py`, as opposed to
+# `pytest` or `python -m unittest` from the repo root) only puts THIS
+# file's own directory (tests/) on sys.path by default -- not the repo
+# root -- so `from motion...` / `import tools...` fail with
+# "ModuleNotFoundError: No module named 'motion'". Same fix, same
+# reasoning, as scan/scan_manager.py and adaptive_scan/adaptive_scan_logger.py.
+import os as _os
+import sys as _sys
+
+_REPO_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _REPO_ROOT not in _sys.path:
+    _sys.path.insert(0, _REPO_ROOT)
+# ---------------------------------------------------------------------------
+
 from motion.motion_controller import MotionFault
 from motion.real_conexagap_motion import ConexAGAPController
 import motion.real_conexagap_motion as conex_module
