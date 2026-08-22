@@ -41,6 +41,13 @@ motion:
   # The old newport_8742 block is kept commented out below for reference/
   # rollback -- don't delete it until the CONEX-AGAP is confirmed reliable
   # on-site.
+  #
+  # 2026-08-18: user decided to REPLACE this controller entirely with the
+  # Optotune MR-15-30 + MR-E-3 (see the "NEXT hardware (mr1530...)" draft
+  # block below and docs/mr1530_migration_plan.md). Still active here
+  # because the new driver is a scaffold pending Optotune's protocol docs
+  # and the hardware hasn't shipped -- don't switch `controller:` to
+  # mr1530 until that block's TODOs are resolved.
   controller: conex_agap
   port: "COM4"                # REQUIRED -- Windows COM port (Device Manager >
                                # Ports (COM & LPT), once the Newport USB driver
@@ -100,6 +107,57 @@ motion:
     # calibrated for real, double check these mm limits still map to
     # something inside +/-1 deg, don't just carry over the 8742's numbers
     # unchanged.
+
+  # --- NEXT hardware (mr1530: Optotune MR-15-30 + MR-E-3, closed-loop FSM) ---
+  # 2026-08-18: user decided this REPLACES conex_agap entirely (not an
+  # addition). DRAFT block, v2 -- motion/real_mr1530_motion.py now
+  # implements move_to()/wait_for_settle()/home() (hard_home path) for
+  # real, against Optotune's published Operation Manual protocol, but
+  # get_position() and everything downstream of it (fiducial homing,
+  # calibration jogging) still raise NotImplementedError pending a
+  # position-readback architecture decision -- see
+  # docs/mr1530_migration_plan.md section 3b. Do not uncomment/activate
+  # this block for real scanning until that's resolved and the driver's
+  # been exercised against a fake-serial simulator, same verification
+  # approach used before the CONEX-AGAP first touched real hardware.
+  # controller: mr1530
+  # port: "COMn"               # Windows COM port once the MR-E-3 USB driver
+  #                            # is installed -- find via Device Manager or
+  #                            # `python motion/real_mr1530_motion.py --list-ports`
+  # motion_enabled: false      # FAIL-CLOSED operator interlock, same pattern
+  #                            # as conex_agap.
+  # deg_per_mm_x: ???          # NO SAFE PLACEHOLDER -- unlike conex_agap's 0.05,
+  # deg_per_mm_y: ???          # this device's mount geometry/throw distance
+  #                            # hasn't been characterized. Must be calibrated
+  #                            # on-site before this driver's __init__ will even
+  #                            # accept it (see real_mr1530_motion.py). Same
+  #                            # convention as conex_agap: MECHANICAL degrees
+  #                            # of mirror tilt per mm -- the driver handles
+  #                            # the mechanical->optical->normalized-XY
+  #                            # conversion internally.
+  # invert_x: false            # re-verify independently on real wiring -- don't
+  # invert_y: false            # assume conex_agap's invert_y carries over.
+  #                            # (axis_x/axis_y are NOT needed for this
+  #                            # controller -- confirmed the MR-E-3 addresses
+  #                            # X/Y directly, unlike conex_agap's U/V letters.)
+  # hard_home: true            # true -> XY=0;0 (unit-circle center, always
+  #                            # valid) -- the only home() path implemented
+  #                            # so far. false (fiducial soft-home) is NOT
+  #                            # yet implemented -- needs get_position() to
+  #                            # be real first, see migration plan 3b.
+  # move_timeout_s: 30
+  # soft_limits:
+  #   x_min_mm: 0
+  #   x_max_mm: 50
+  #   y_min_mm: 0
+  #   y_max_mm: 50
+  #   # NOTE: this device's reachable range is a UNIT CIRCLE (X^2+Y^2<=1 in
+  #   # its own normalized coordinates, corresponding to +/-25 deg
+  #   # mechanical / +/-50 deg optical in any direction), not two
+  #   # independent per-axis limits like conex_agap's SL/SR -- do NOT carry
+  #   # conex_agap's soft_limits over unchanged; they need a fresh value
+  #   # sized to the real throw distance and this different constraint
+  #   # shape.
 
   # --- Previous hardware (newport_8742 + 8816-6, open-loop picomotor) ---
   # controller: newport_8742

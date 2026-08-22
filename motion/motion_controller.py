@@ -9,7 +9,11 @@ MockMotionController (for development without hardware),
 NewportPicomotorController (real Newport 8742 + 8816-6 hardware, see
 real_newport_motion.py -- open-loop, being phased out), and
 ConexAGAPController (real Newport CONEX-AGAP + AG-M100D hardware, see
-real_conexagap_motion.py -- closed-loop, its replacement).
+real_conexagap_motion.py -- closed-loop, being phased out as of
+2026-08-18 per user decision), and MR1530Controller (real Optotune
+MR-15-30 + MR-E-3 hardware, see real_mr1530_motion.py -- closed-loop,
+its replacement; SCAFFOLD ONLY as of 2026-08-18, not yet functional --
+see that module's docstring).
 """
 
 from abc import ABC, abstractmethod
@@ -244,7 +248,17 @@ def get_motion_controller(config):
       conex_agap         → ConexAGAPController (real hardware; closed-loop
                            CONEX-AGAP + AG-M100D mirror mount -- see
                            real_conexagap_motion.py for why this replaces
-                           newport_8742 and what config keys it needs)
+                           newport_8742 and what config keys it needs).
+                           Being phased out as of 2026-08-18 in favor of
+                           mr1530; kept for rollback.
+      mr1530              → MR1530Controller (real hardware; closed-loop
+                           Optotune MR-15-30 + MR-E-3 mirror -- see
+                           real_mr1530_motion.py. SCAFFOLD ONLY as of
+                           2026-08-18: raises NotImplementedError on
+                           construction until Optotune's command/register
+                           protocol docs are filled in. This is the
+                           designated replacement for conex_agap, see
+                           docs/mr1530_migration_plan.md.)
     """
     motion_cfg = config.get("motion", {})
     controller_type = motion_cfg.get("controller")
@@ -271,9 +285,18 @@ def get_motion_controller(config):
             from real_conexagap_motion import ConexAGAPController
         return ConexAGAPController(config)
 
+    if controller_type == "mr1530":
+        try:
+            from .real_mr1530_motion import MR1530Controller
+        except ImportError:
+            # Fallback for running this file directly, where relative imports
+            # don't work because there's no parent package.
+            from real_mr1530_motion import MR1530Controller
+        return MR1530Controller(config)
+
     raise ValueError(
         f"Unknown motion controller type: '{controller_type}'. "
-        "Supported: newport_8742 | conex_agap | null (mock)"
+        "Supported: newport_8742 | conex_agap | mr1530 | null (mock)"
     )
 
 
