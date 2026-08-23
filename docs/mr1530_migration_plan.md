@@ -1,16 +1,17 @@
 # MR-15-30 Migration Plan — Replacing CONEX-AG-M100D
 
-Status: updated 2026-08-18 (v2). Hardware not yet ordered. This plan is
+Status: updated 2026-08-23 (v3). Hardware not yet ordered. This plan is
 written from the existing codebase (`motion/motion_controller.py`,
 `motion/real_conexagap_motion.py`, `scan/calibrate_scan_area.py`,
 `scan/scan_manager.py`, `config.yaml`) plus what Optotune confirmed in the
-Aug 14–18 quote thread, plus (v2) the publicly published **MR-E-3
-Development Kit Operation Manual** found on optotune.com — this resolved
-most of what section 3 originally called "blocking on vendor docs." One
-real fork remains: reading back ACTUAL (measured) mirror position needs
-either a separate Firmware Documentation zip this session couldn't
-download (network-restricted), or Optotune's official Python SDK — see
-section 3b, ARCHITECTURE DECISION NEEDED.
+Aug 14–18 quote thread, the publicly published **MR-E-3 Development Kit
+Operation Manual** (v2), and now (v3) the user's downloaded **MR-E Python
+SDK** (`optomdc`/`optokummenberg` wheels) and firmware bundle. Section 3b's
+architecture fork is now **RESOLVED**: read the SDK's pure-Python source as
+a correctness reference (not a runtime dependency), hand-port the exact
+Pro-mode protocol into this driver. `real_mr1530_motion.py` v3 is now
+functionally complete — every `MotionController` method implemented —
+though still untested against real hardware. See section 3b and section 4.
 
 ## 1. What stays untouched
 
@@ -142,77 +143,113 @@ All of this is implemented in `real_mr1530_motion.py` v2: `home()`
 (hard_home path only), `move_to()`, and `wait_for_settle()` are real, not
 TODO stubs, against this confirmed protocol.
 
-## 3b. Architecture decision needed — reading ACTUAL position
+## 3b. Position readback — RESOLVED (v3)
 
 The Operation Manual's Simple Serial command table has **no command that
 reads back measured position** — only `X=`/`Y=`/`XY=` to *set* commanded
 position. Reading actual closed-loop position requires "Pro mode"
 (`GOPRO`/`GOPROCRC`), a binary register-addressed protocol the Operation
-Manual explicitly defers to the separate Firmware Documentation zip: *"For
-full description of the MR-E-3 register map, please refer to MR-E-3
-Firmware documentation."* That's the same document referenced in the SPI
-section, which does list `0x2300`/`0x2301` as "Optical feedback read
-registers X, Y" over SPI — plausibly the same registers apply over
-Pro-mode serial, but the exact binary frame format for serial Pro mode
-isn't in the Operation Manual, and this session couldn't fetch the zip to
-check.
+Manual explicitly deferred to a separate Firmware Documentation zip.
 
-Two ways to close this, genuinely different trade-offs, worth deciding
-deliberately rather than defaulting into one:
+The user supplied two downloaded folders directly: the firmware bundle
+(`MR-E-3_Firmware_1.6.742180/`) and the **official MR-E Python SDK**
+(`MR-E_PythonSDK_1.3.5434/`, two wheels: `optomdc` + `optokummenberg`).
 
-1. **Get the Firmware Documentation zip** (link below) and hand-roll the
-   Pro-mode binary protocol in pure pyserial — consistent with this
-   project's established "no vendor SDK" precedent from the CONEX-AGAP
-   integration. More work, but zero new dependency and full control over
-   the exact bytes on the wire (useful given `_wait_move()`'s timeout path
-   currently has no documented stop command to fall back on — Pro mode
-   might expose one).
-2. **Use Optotune's official "MR-E Python SDK"** — pure Python (unlike the
-   CONEX-AGAP's rejected `ConexAGAPCmdLib.dll`, a Windows-only .NET wrapper
-   that was the actual reason "no vendor SDK" became this project's default
-   — see `real_conexagap_motion.py`'s module docstring). Almost certainly
-   already implements Pro-mode register reads correctly, and may also
-   expose a real stop/abort command this driver currently lacks. Real
-   dependency addition, and a deliberate departure from precedent — but
-   that precedent was a reaction to a specific bad option, not a blanket
-   rule.
+- **Firmware folder was a dead end** — it contains only the compiled
+  `.hex` firmware binary and a release-notes text file. Not the separate
+  "Firmware Documentation" PDF/zip referenced in the manual; not useful for
+  protocol reverse-engineering.
+- **SDK folder had the actual answer.** Unzipped both `.whl` files (plain
+  ZIP archives) and confirmed they're pure Python — no compiled
+  extensions, same situation as `real_newport_motion.py` avoiding
+  pylablib and `real_conexagap_motion.py` avoiding the CONEX-AGAP's
+  Windows-only `.NET` DLL. That's a materially different case from those
+  precedents, which existed specifically because those two vendor SDKs
+  weren't pure Python. **Decision: read the SDK source as a correctness
+  reference, do not add it as a runtime dependency.** Hand-port the exact
+  protocol logic into this driver's existing pyserial-only pattern. This
+  gets vendor-verified correctness (not a blind guess at the binary
+  format) while keeping the project's "no vendor SDK dependency"
+  convention intact.
 
-**Direct download links** (couldn't fetch these directly from this
-session's sandbox — pull them yourself and send back, or make the call on
-option 1 vs. 2 above):
-- Firmware Documentation zip: `https://files.optotune.com/hubfs/2025%20Website%20Downloads/Download%20Hub/MR-E-3_Firmware_Documentation_1.6.742180.zip`
-- MR-E Python SDK zip: `https://145326430.fs1.hubspotusercontent-eu1.net/hubfs/145326430/2025%20Website%20Downloads/Download%20Hub/MR-E_PythonSDK_1.3.5434.zip`
-- Operation Manual (already read into this plan): `https://145326430.fs1.hubspotusercontent-eu1.net/hubfs/145326430/2025%20Website%20Downloads/Download%20Hub/Optotune+MR-E-3+Development+Kit+Operation+manual.pdf`
+**What was found, reading the SDK source directly:**
 
-Until this is decided, `get_position()`, `get_position_deg()`,
-`get_absolute_position_deg()`, `zero_here()`, `calibration_jog_deg()`, and
-the `hard_home: false` fiducial path of `home()` all raise
-`NotImplementedError` in `real_mr1530_motion.py` v2 — deliberately, not
-stubbed with last-commanded position as a stand-in. Given this device's
-accuracy (0.15°) is ~65× worse than its repeatability (40 μrad), silently
-substituting commanded for measured position would defeat the entire
-reason this project calibrates against real closed-loop feedback.
+- Pro-mode frame format (`optoKummenberg/tools/parsing_tools.py`):
+  `0x7E` + slave_addr(`0x00`) + command_id(1B) + size(1B) + payload +
+  CRC(2B) + `0x7E`. Byte-stuffing: `0x7D`/`0x7E` inside the payload is
+  escaped as `0x7D` followed by `byte XOR 0x20`. CRC is never actually
+  computed by the firmware/SDK in practice (`CRC_ENABLED` is always
+  False) — always `0x00 0x00`.
+- Command IDs (`optoKummenberg/tools/definitions.py`): `GET_VALUE=0x11`,
+  `SET_VALUE=0x10`, `SET_COMM_MODE=0x06`, plus others not needed here.
+- **The actual position registers**: `optomdc/registers/mre3_registers.py`
+  — the `RadialBasisFunction` system (sys_id `0x3B`) exposes **`0x3B00`
+  ("Mirror coordinate X") and `0x3B01` ("Mirror coordinate Y")** as
+  read-only floats, explicitly documented as the "mirror unary circle X/Y
+  coordinate" — i.e. actual measured position, same normalized unit-circle
+  coordinate system as the Simple Serial `X=`/`Y=`/`XY=` move commands.
+  This is the single register pair the driver now reads.
+  (An alternative, more roundabout path also exists via
+  `SignalFlowManager.GetStageOutput()` reading the feedback signal-flow
+  block — confirmed working in the SDK's own
+  `MR-E-3_ReadBackSignalFlowValues.py` example — but 0x3B00/0x3B01 is
+  simpler and was used instead.)
+- **Correction to an earlier assumption**: the original email thread's
+  mention of "register 0x1007" is `MRE3Status`'s generic board-fault
+  register (channel faults, overheat, device-not-detected, over-current)
+  — **not** a mirror-settled bit. It's unrelated to position or settling.
+  The settle mechanism used by `wait_for_settle()` remains the Simple
+  Serial `STATUS` command's bit 4, confirmed from the Operation Manual —
+  that part of the v2 driver was already correct and is unchanged.
+- **Mode switching is bidirectional and cheap**: ASCII `GOPRO` enters Pro
+  mode; a Pro-mode `SET_COMM_MODE(0)` frame plus a fresh `START`/`OK`
+  handshake exits back to Simple Serial (confirmed via
+  `optoKummenberg.commands.Command.go_pro()`/`go_simple()`). The driver
+  wraps every position read in enter/exit-Pro-mode so moves stay on the
+  simpler Simple Serial path.
+- **No stop/abort command exists anywhere** — confirmed absent from both
+  the Operation Manual and every method on the SDK's `Command` class, not
+  just undocumented. `wait_for_settle()`'s timeout-escalation path has
+  nothing to fall back on; this is a genuine firmware limitation, not a
+  gap in this driver.
+
+`real_mr1530_motion.py` v3 implements all of this: `get_position()`,
+`get_position_deg()`, `get_absolute_position_deg()`, `zero_here()`,
+`calibration_jog()`, `calibration_jog_deg()`, and `home()`'s
+`hard_home: false` fiducial path (now just calls `zero_here()`) are real,
+not `NotImplementedError` stubs.
 
 ## 4. What's done now vs. what's still open
 
-Done in `real_mr1530_motion.py` v2: config parsing (including a hard
-refusal to start without `deg_per_mm_x/y` explicitly set — no safe
-placeholder exists for this device the way the CONEX had one), serial
-connect + `START`/`GETID` handshake, `move_to()` (mm → mechanical deg →
-optical deg → normalized XY, unit-circle validation before send),
-`wait_for_settle()` (STATUS bit 4 polling, plus fails loud on current-limit
-or thermal-limit bits instead of ignoring them), and `home()`'s
-`hard_home: true` path. `motion_controller.py`'s factory has the `mr1530`
-branch wired in. `config.example.yaml` has a draft commented block.
+Done in `real_mr1530_motion.py` v3: everything from v2 (config parsing
+including a hard refusal to start without `deg_per_mm_x/y` explicitly set,
+serial connect + `START`/`GETID` handshake, `move_to()`, `wait_for_settle()`
+via STATUS bit 4, `home()`'s `hard_home: true` path) **plus** the full
+Pro-mode position-readback stack: `get_position()`, `get_position_deg()`,
+`get_absolute_position_deg()`, `zero_here()`, `calibration_jog()`,
+`calibration_jog_deg()`, and `home()`'s `hard_home: false` fiducial path.
+Every `MotionController` method is now implemented — no
+`NotImplementedError` stubs remain. `motion_controller.py`'s factory has
+the `mr1530` branch wired in. `config.example.yaml` has a draft commented
+block.
 
-Still open: the position-readback decision (3b) — everything downstream of
-it (fiducial homing, calibration jogging, `get_position()` for
-`calibrate_scan_area.py` and `scan_manager.py`'s point logging) is blocked
-until that's resolved. Also open: whether Pro mode exposes an explicit stop
-command (`wait_for_settle()`'s timeout path currently has none to fall back
-on, unlike the CONEX's `ST`) — worth checking once the Firmware
-Documentation or SDK source is available. And: `calibrate_scan_area.py`'s
-CONEX-tuned numeric constants (unchanged from v1 of this plan, see below).
+**The driver is functionally complete but has never touched real
+hardware.** Still open:
+
+- **No pre-hardware test harness yet.** The CONEX-AGAP integration was
+  verified before hardware arrived using a hand-written fake-serial
+  simulator implementing the documented ASCII protocol (see section 5).
+  The equivalent for this driver — now needing to simulate both Simple
+  Serial AND Pro-mode binary frames — hasn't been built yet. This is the
+  natural next step before trusting v3 against anything, simulated or
+  real.
+- **No stop/abort command exists in firmware** (confirmed, not just
+  undocumented — see 3b). `wait_for_settle()`'s timeout-escalation path
+  has no hardware-level abort to call; worth deciding whether that's
+  acceptable as-is or needs a mitigation (e.g. driving back to a known-safe
+  XY on timeout instead of a true stop).
+- `calibrate_scan_area.py`'s CONEX-tuned numeric constants (unchanged from
+  v1 of this plan, see below) — still deferred, not blocking.
 
 ## 5. Rollback / testing posture
 
@@ -220,7 +257,8 @@ Keep `real_conexagap_motion.py` and the `conex_agap` config path exactly as
 they are — commented alongside, not deleted — same posture as the 8742 code
 after its cutover. The CONEX-AGAP integration was verified pre-hardware
 against a hand-written fake-serial simulator implementing the documented
-ASCII protocol; the same approach applies here once the real protocol is
-known, and is the only way to exercise this driver before physical hardware
-arrives (lead time still unconfirmed as of 2026-08-18, see
-`optotune_mr1530_fsm_evaluation` memory).
+ASCII protocol; the same approach now applies here, with the protocol fully
+known as of v3 (both Simple Serial and Pro-mode binary) — building that
+simulator is the next concrete step, and the only way to exercise this
+driver before physical hardware arrives (lead time still unconfirmed as of
+2026-08-18, see `optotune_mr1530_fsm_evaluation` memory).
