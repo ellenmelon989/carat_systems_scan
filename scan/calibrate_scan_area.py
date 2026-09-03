@@ -929,7 +929,12 @@ def main():
     }
     masked_points, _, _ = generate_grid(preview_scan_cfg)
     n_points = len(masked_points)
-    est_s = n_points * passes * dwell_time_s
+    settle_time_s = config.get("scan", {}).get("settle_time_s", 0.0)
+    # n_points is the WAFER-MASKED count -- pass it as nx with ny=1, same
+    # call shape as gui/calibration_panel.py's preview, so both reuse
+    # estimate_scan_time_s() without overstating time the way the unmasked
+    # nx*ny bounding box would. See scan_params.py.
+    est_s = scan_params.estimate_scan_time_s(n_points, 1, dwell_time_s, settle_time_s, passes)
 
     print("\n--- Preview ---")
     print(f"  Bounding box: {nx} x {ny} = {nx * ny} grid positions")
@@ -938,6 +943,11 @@ def main():
     print(f"  Passes: {passes}")
     print(f"  Estimated scan time: {est_s / 60:.1f} min "
           f"({n_points * passes} total point measurements, excluding reference-point revisits)")
+
+    if est_s > scan_params.SCAN_TIME_WARNING_THRESHOLD_S:
+        print(f"  *** WARNING: estimated scan time exceeds the "
+              f"{scan_params.SCAN_TIME_WARNING_THRESHOLD_S / 60:.0f}-min target. "
+              "Consider a larger step size, shorter dwell time, or fewer passes. ***")
 
     if input("\nWrite these values to config.yaml? [y/N] ").strip().lower() != "y":
         print("Not written. Re-run to try again.")

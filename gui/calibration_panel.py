@@ -651,7 +651,12 @@ class CalibrationPanel(ttk.Frame):
         }
         masked_points, _, _ = generate_grid(preview_scan_cfg)
         n_points = len(masked_points)
-        est_s = n_points * passes * dwell_time_s
+        settle_time_s = self.config.get("scan", {}).get("settle_time_s", 0.0)
+        # n_points is the WAFER-MASKED count (bounding box minus corner/
+        # off-wafer positions) -- pass it as nx with ny=1 so this reuses
+        # the shared estimate_scan_time_s() without overstating time the
+        # way the unmasked nx*ny bounding box would. See scan_params.py.
+        est_s = scan_params.estimate_scan_time_s(n_points, 1, dwell_time_s, settle_time_s, passes)
 
         self.area = area
         self.radius_mm = radius_mm
@@ -669,6 +674,16 @@ class CalibrationPanel(ttk.Frame):
         self._log(f"Passes: {passes}")
         self._log(f"Estimated scan time: {est_s / 60:.1f} min "
                   f"({n_points * passes} total point measurements)")
+
+        if est_s > scan_params.SCAN_TIME_WARNING_THRESHOLD_S:
+            messagebox.showwarning(
+                "Scan time estimate",
+                f"Estimated scan time is {est_s / 60:.1f} min, over the "
+                f"{scan_params.SCAN_TIME_WARNING_THRESHOLD_S / 60:.0f}-min target.\n\n"
+                "Consider a larger step size, shorter dwell time, or fewer "
+                "passes -- or proceed anyway if this scan is expected to "
+                "run long.",
+            )
 
         self._render_preview(nx, ny, n_points, est_s)
 

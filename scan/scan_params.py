@@ -33,6 +33,15 @@ PASSES_DEFAULT = 1
 PASSES_MIN = 1
 PASSES_MAX = 50
 
+# Scan-time preview warn threshold: the written requirement is "scan should
+# take less than 30 minutes; warn the operator if the current parameters
+# would exceed it." This is only a UI-preview threshold (used by
+# calibration_panel.py's live preview and calibrate_scan_area.py's CLI
+# preview), not an execution-time cap -- scans are never blocked from
+# running past it, just flagged before the operator commits to them via
+# "Write to config.yaml" / the y/N prompt.
+SCAN_TIME_WARNING_THRESHOLD_S = 1800.0
+
 
 def validate_dwell_time_s(dwell_time_s: float) -> float:
     """Raise ValueError if dwell_time_s is outside the operator-valid range."""
@@ -273,4 +282,24 @@ if __name__ == "__main__":
     est3 = estimate_scan_time_s(*grid_dims_from_range([0, 50], [0, 50], 2.0), dwell_time_s=8.0, passes=3)
     assert est3 == est * 3
     print(f"26x26 grid @ 8s dwell, 3 passes -> {est3/60:.1f} min estimated scan time")
+
+    # Regression for 2026-09-03: calibration_panel.py and
+    # calibrate_scan_area.py both call this with the WAFER-MASKED point
+    # count (not nx*ny) passed as nx with ny=1, since the circular mask
+    # excludes corner/off-wafer positions the bounding-box grid would
+    # otherwise overstate -- confirm that call shape still resolves to
+    # n_points * passes * (dwell + settle) with settle_time_s included.
+    est_masked = estimate_scan_time_s(529, 1, dwell_time_s=2.0, settle_time_s=0.5, passes=1)
+    assert est_masked == 529 * (2.0 + 0.5)
+    est_masked_passes = estimate_scan_time_s(529, 1, dwell_time_s=2.0, settle_time_s=0.5, passes=2)
+    assert est_masked_passes == est_masked * 2
+    print(f"529-point masked grid @ 2.0s dwell + 0.5s settle, 1 pass -> "
+          f"{est_masked/60:.1f} min; 2 passes -> {est_masked_passes/60:.1f} min")
+
+    # Regression: SCAN_TIME_WARNING_THRESHOLD_S itself is exercised as a
+    # plain comparison at both call sites, not a function -- just confirm
+    # it's the documented 30 minutes so a future edit here doesn't silently
+    # change the warning's meaning without updating the docstring/comment.
+    assert SCAN_TIME_WARNING_THRESHOLD_S == 1800.0
+
     print("scan_params smoke test OK")
