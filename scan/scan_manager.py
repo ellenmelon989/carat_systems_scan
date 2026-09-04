@@ -45,6 +45,8 @@ from scan.data_logger import DataLogger, build_point_record, resolve_run_dir
 from scan.oes_store import OESStore
 from scan.scan_params import (
     PASSES_DEFAULT,
+    STEP_SIZE_MIN_MM,
+    STEP_SIZE_MAX_MM,
     grid_dims_from_range,
     in_radius,
     validate_dwell_time_s,
@@ -106,6 +108,101 @@ def generate_grid(scan_cfg):
             points.append((ix, iy, float(x), float(y)))
 
     return points, xs, ys
+
+
+def solve_step_size_for_target_points(center_mm, radius_mm, target_n_points,
+                                       step_min_mm=STEP_SIZE_MIN_MM,
+                                       step_max_mm=STEP_SIZE_MAX_MM,
+                                       scan_order="raster"):
+    """
+    PR2a (2026-09-04): find the LARGEST step_size_mm -- coarsest, so the
+    fastest scan -- whose masked circular grid (tightly boxed around
+    center_mm/radius_mm, same in_radius() masking generate_grid() applies
+    everywhere else) contains AT LEAST target_n_points points.
+
+    "At least, never fewer" per the confirmed requirement: resolution is
+    never sacrificed below what was asked for, even if that means running
+    a bit longer than a naive reading of target_n_points would suggest.
+    Bisects on step_size_mm rather than solving in closed form, because
+    the masked point count is a step function of step size (grid
+    quantization + the circular mask), not a smooth one.
+
+    Lives here, not in scan_params.py, because it has to call
+    generate_grid() to count points -- scan_manager.py already imports
+    scan_params.py, so the reverse import would be circular. Both
+    existing call sites that need generate_grid() already reach into
+    this module locally for exactly that reason (see PR1's comments in
+    gui/calibration_panel.py and calibrate_scan_area.py) -- this is the
+    same pattern, one more name in that same local import.
+
+    Returns (step_size_mm, n_points, achieved):
+      achieved=True  -- n_points >= target_n_points, step_size_mm is the
+                         coarsest step that gets there.
+      achieved=False -- even step_min_mm (the 1mm floor) can't reach
+                         target_n_points at this radius; step_size_mm is
+                         step_min_mm and n_points is the MAXIMUM
+                         achievable -- surface this to the operator
+                         rather than silently returning an undersized
+                         scan.
+    """
+    cx, cy = center_mm
+    x_range_mm = [cx - radius_mm, cx + radius_mm]
+    y_range_mm = [cy - radius_mm, cy + radius_mm]
+
+    def n_points_at(step_size_mm):
+        cfg = {
+            "grid": {
+                "x_range_mm": x_range_mm,
+                "y_range_mm": y_range_mm,
+                "wafer_center_mm": [cx, cy],
+                "wafer_radius_mm": radius_mm,
+                "step_size_mm": step_size_mm,
+            },
+            "scan_order": scan_order,
+        }
+        points, _, _ = generate_grid(cfg)
+        return len(points)
+
+    n_at_max = n_points_at(step_max_mm)
+    if n_at_max >= target_n_points:
+        return step_max_mm, n_at_max, True
+
+    n_at_min = n_points_at(step_min_mm)
+    if n_at_min < target_n_points:
+        return step_min_mm, n_at_min, False
+
+    # Invariant now holds: n_points_at(lo) >= target > n_points_at(hi).
+    lo, hi = step_min_mm, step_max_mm
+    for _ in range(40):  # far more than enough for sub-1e-4mm precision
+        if hi - lo < 1e-7:
+            break
+        mid = (lo + hi) / 2.0
+        if n_points_at(mid) >= target_n_points:
+            lo = mid
+        else:
+            hi = mid
+
+    # Round to the codebase's persisted config precision (4 decimal
+    # places -- matches CONFIG_RANGE_DECIMALS in calibrate_scan_area.py;
+    # kept as a local literal here rather than importing it, to avoid
+    # scan_manager.py reaching up into a calibration-workflow module for
+    # a constant). Round DOWN (finer step, never coarser) and re-verify
+    # -- rounding can tip the count back under target, exactly the class
+    # of bug the 2026-07-17 grid-mismatch diagnosis already hit once from
+    # an unguarded round().
+    quantum = 1e-4
+    step_rounded = (int(lo / quantum)) * quantum  # truncate toward zero == round down for positive mm
+    step_rounded = round(step_rounded, 4)
+    step_rounded = max(step_rounded, step_min_mm)
+    n_rounded = n_points_at(step_rounded)
+    if n_rounded < target_n_points:
+        # Extremely rare (rounding landed exactly on a mask boundary) --
+        # fall back to the un-rounded bisection value rather than
+        # under-deliver.
+        step_rounded = lo
+        n_rounded = n_points_at(step_rounded)
+
+    return step_rounded, n_rounded, True
 
 
 def compute_commanded_points(scan_cfg):

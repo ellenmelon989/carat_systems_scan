@@ -14,6 +14,23 @@ scan.grid in config.yaml.
 
 from __future__ import annotations
 
+# --- repo-root import bootstrap -------------------------------------------
+# Added PR2a (2026-09-04): this module's __main__ self-check now exercises
+# solve_step_size_for_target_points() (scan_manager.py) via a local import,
+# so `python scan/scan_params.py` needs the repo root on sys.path the same
+# way scan_manager.py and calibrate_scan_area.py already do for themselves
+# -- see scan_manager.py's own copy of this comment for the full rationale.
+# Harmless as an import-time no-op for every OTHER caller of this module
+# (gui/, calibrate_scan_area.py, scan_manager.py itself), since they
+# already put the repo root on sys.path before importing scan_params.
+import os as _os
+import sys as _sys
+
+_REPO_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _REPO_ROOT not in _sys.path:
+    _sys.path.insert(0, _REPO_ROOT)
+# ---------------------------------------------------------------------------
+
 DWELL_TIME_DEFAULT_S = 8.0
 DWELL_TIME_MIN_S = 2.0
 DWELL_TIME_MAX_S = 22.0
@@ -301,5 +318,32 @@ if __name__ == "__main__":
     # it's the documented 30 minutes so a future edit here doesn't silently
     # change the warning's meaning without updating the docstring/comment.
     assert SCAN_TIME_WARNING_THRESHOLD_S == 1800.0
+
+    # PR2a (2026-09-04): solve_step_size_for_target_points() lives in
+    # scan_manager.py, not here (it needs generate_grid() to count points,
+    # and scan_manager.py already imports this module -- the reverse
+    # import would be circular). Exercise it here anyway, via a LOCAL
+    # import (same pattern gui/calibration_panel.py and
+    # calibrate_scan_area.py already use to reach generate_grid()) --
+    # this stays the one place in the repo with a real regression
+    # self-check, per the 2026-08-05 test-coverage-gap finding.
+    from scan.scan_manager import solve_step_size_for_target_points
+
+    step_500, n_500, ok_500 = solve_step_size_for_target_points((0.0, 0.0), 25.0, 500)
+    assert ok_500 and n_500 >= 500
+    print(f"solve_step_size_for_target_points: target 500 pts, r=25mm -> "
+          f"step={step_500}mm, {n_500} pts, achieved={ok_500}")
+
+    # Finer target must never resolve to a COARSER step than a looser one
+    # -- otherwise the "at least N, never fewer" contract is broken.
+    step_loose, n_loose, _ = solve_step_size_for_target_points((0.0, 0.0), 25.0, 200)
+    step_tight, n_tight, _ = solve_step_size_for_target_points((0.0, 0.0), 25.0, 800)
+    assert step_tight <= step_loose and n_tight >= 800 and n_loose >= 200
+
+    # Infeasible case (target unreachable even at the 1mm step floor)
+    # must report achieved=False with the max actually achievable, not
+    # silently return an undersized scan.
+    step_inf, n_inf, ok_inf = solve_step_size_for_target_points((0.0, 0.0), 2.0, 10000)
+    assert not ok_inf and step_inf == STEP_SIZE_MIN_MM
 
     print("scan_params smoke test OK")
