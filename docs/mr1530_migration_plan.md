@@ -244,10 +244,23 @@ hardware.** Still open:
   natural next step before trusting v3 against anything, simulated or
   real.
 - **No stop/abort command exists in firmware** (confirmed, not just
-  undocumented — see 3b). `wait_for_settle()`'s timeout-escalation path
-  has no hardware-level abort to call; worth deciding whether that's
-  acceptable as-is or needs a mitigation (e.g. driving back to a known-safe
-  XY on timeout instead of a true stop).
+  undocumented — see 3b). **DECIDED 2026-09-05**: `wait_for_settle()`'s
+  timeout path freezes (raises `AxisStateUnknown`, sends no further
+  commands, requires a human to check the hardware) rather than
+  auto-recovering by driving to a known-safe XY — auto-recovery means
+  commanding a new move on top of an axis whose real state is
+  unconfirmed, which is exactly what `AxisStateUnknown`'s contract in
+  `motion_controller.py` exists to prevent, and "safe" is
+  optics-dependent in a way this driver has no basis to assert on its
+  own. What v4 adds is diagnosis, not recovery: the timeout path now
+  makes a best-effort Pro-mode read of the board-fault register
+  (`_REG_SYSTEM_STATUS_ERRORS`, 0x1007) via
+  `_diagnose_timeout_fault()` and folds the raw value into the raised
+  exception/log — see `real_mr1530_motion.py`'s module docstring V4
+  UPDATE section and `tests/test_mr1530_safety.py`. Still no true
+  stop/abort exists; if the *controller itself* (not just the mirror)
+  ever wedges, the only real fix is a power cycle — deferred until
+  there's actual evidence of that happening, not built preemptively.
 - `calibrate_scan_area.py`'s CONEX-tuned numeric constants (unchanged from
   v1 of this plan, see below) — still deferred, not blocking.
 

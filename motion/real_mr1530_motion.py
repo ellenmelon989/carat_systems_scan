@@ -21,6 +21,15 @@ a fake-serial simulator," the same pre-hardware verification step used
 for real_conexagap_motion.py, not as "ready to run against real hardware
 unsupervised."
 
+v4 (2026-09-05): wait_for_settle()'s timeout path now makes a
+best-effort diagnostic read of the board-fault register before raising
+AxisStateUnknown -- see the V4 UPDATE section further below and
+_diagnose_timeout_fault(). This is diagnosis only; the decision to
+freeze (raise, send no further motion) rather than auto-recover on a
+timeout is unchanged and deliberate, since this firmware has no
+stop/abort command to recover TO. Still functionally complete, still
+untested against real hardware.
+
 SIMPLE SERIAL MODE (moves, settle, handshake) -- from the Operation Manual
 -----------------------------------------------------------------------------
   - Serial framing: 256000 baud, 8 data bits, 1 stop bit, no parity,
@@ -110,14 +119,46 @@ and optokummenberg/commands.py:
     over-current) -- NOT a mirror-settled bit. The email thread's mention
     of "register 0x1007" for settled-status was a mix-up; this driver
     uses the Simple Serial STATUS command's bit 4 for settling instead,
-    confirmed directly against the Operation Manual, and does not touch
-    0x1007 at all yet (a reasonable future addition for board-level fault
-    monitoring, not required for the base move/settle/read loop).
+    confirmed directly against the Operation Manual. As of v4 (see
+    below), 0x1007 IS read, but only as a best-effort diagnostic on a
+    wait_for_settle() timeout -- see _diagnose_timeout_fault().
   - No stop/abort command exists in Simple OR Pro mode (confirmed absent
     from both the Operation Manual's Table 3 and every method in the
     SDK's Command class) -- wait_for_settle()'s timeout path has nothing
     to escalate to, unlike the CONEX's ST command. This is a genuine
     hardware/firmware limitation, not a gap in this driver.
+
+V4 UPDATE (2026-09-05) -- settle-timeout diagnosis, decision on the
+missing stop/abort command
+-----------------------------------------------------------------------------
+Given there is no stop/abort command anywhere in this firmware, the only
+two real options on a wait_for_settle() timeout are (a) freeze -- raise,
+send no further commands, require a human to check the hardware before
+anything moves again -- or (b) auto-recover by commanding the mirror
+somewhere "safe" (e.g. XY=0;0) on the assumption the timeout was benign.
+Decision: (a), unchanged from v3. Auto-recovering with (b) means issuing
+a new motion command on top of an axis whose real state is unconfirmed
+-- exactly the failure mode AxisStateUnknown's contract in
+motion_controller.py exists to prevent (see that class's docstring), and
+"safe" is optics-dependent in a way this driver has no basis to assert.
+What v4 DOES add is diagnosis, not recovery: _wait_move()'s timeout path
+now makes a best-effort Pro-mode read of the board-fault register
+(_REG_SYSTEM_STATUS_ERRORS, 0x1007) via _diagnose_timeout_fault() before
+raising, and folds the raw value into both the log and the raised
+AxisStateUnknown's message -- so an operator sees more than "it didn't
+report stable." This is intentionally NOT bit-level fault decoding: the
+exact field layout of 0x1007 was never confirmed against real
+documentation (only the register's existence and general category came
+from reading the MRE3Status class name while researching position
+readback -- see the class docstring above) -- the raw hex value is
+surfaced for a human to cross-reference against Optotune's own docs, not
+decoded into specific flags this driver would then have to guess the
+meaning of. If the diagnostic read itself fails (e.g. the same comm
+fault that broke settling also breaks Pro mode), that failure is logged
+and folded into the exception message too, rather than silently
+swallowed -- a failed diagnostic read is itself informative (probably a
+dead link, not just a stuck mirror) and must never be treated as "no
+fault found." Still untested against real hardware.
 
 COORDINATE SYSTEM / CONFIG KEYS
 --------------------------------
@@ -223,6 +264,20 @@ _PRO_ERROR_FLAG = 0x80  # response command_id == (sent | 0x80) means error
 # coordinate system as the Simple Serial X=/Y=/XY= commands.
 _REG_MIRROR_COORD_X = 0x3B00
 _REG_MIRROR_COORD_Y = 0x3B01
+
+# Board-level fault/status register (from optomdc/registers/
+# mre3_registers.py's MRE3Status class -- same source as the two
+# registers above) -- distinct from the Simple Serial STATUS command's
+# settle bit. Read ONLY as a best-effort diagnostic on a
+# wait_for_settle() timeout (see _diagnose_timeout_fault()); this driver
+# does not otherwise touch it. Its exact per-bit field layout was never
+# confirmed against real documentation -- only the register's existence
+# and general category (channel faults, over-heat, device-not-detected,
+# over-current) came from reading the MRE3Status class name/docstring
+# while researching position readback. Treat the raw value as a
+# diagnostic clue for a human to cross-reference against Optotune's
+# docs, not as a decoded flag this driver can act on with confidence.
+_REG_SYSTEM_STATUS_ERRORS = 0x1007
 
 _PRO_FRAME_TIMEOUT_S = 2.0
 
@@ -572,6 +627,20 @@ class MR1530Controller(MotionController):
             self._exit_pro_mode()
         return self._xy_to_mech_deg(norm_x, norm_y)
 
+    def _read_fault_register(self) -> int:
+        """Diagnostic-only Pro-mode read of _REG_SYSTEM_STATUS_ERRORS,
+        used by _diagnose_timeout_fault() on a wait_for_settle() timeout.
+        Same enter/read/exit-Pro-mode shape as
+        _read_actual_mechanical_deg() -- always attempts to return to
+        Simple mode even if the read itself fails, so a failed
+        diagnostic attempt doesn't additionally strand the connection in
+        Pro mode."""
+        self._enter_pro_mode()
+        try:
+            return self._pro_get_uint32(_REG_SYSTEM_STATUS_ERRORS)
+        finally:
+            self._exit_pro_mode()
+
     # ------------------------------------------------------------------
     # Resource management
     # ------------------------------------------------------------------
@@ -675,7 +744,11 @@ class MR1530Controller(MotionController):
         escalation. There is no documented stop command in this
         firmware (confirmed absent from both the Simple Serial command
         table and every method in Optotune's own SDK) -- a timeout here
-        raises AxisStateUnknown directly, with nothing to try first."""
+        raises AxisStateUnknown directly, with nothing to try first, but
+        (v4) first makes a best-effort diagnostic read of the board-fault
+        register via _diagnose_timeout_fault() and folds it into the
+        raised message -- diagnosis only, never a reason to auto-command
+        another move. See the module docstring's V4 UPDATE section."""
         deadline = time.monotonic() + self._move_timeout
         while time.monotonic() < deadline:
             try:
@@ -712,12 +785,57 @@ class MR1530Controller(MotionController):
                 )
             time.sleep(_MOVE_POLL_S)
 
+        fault_note = self._diagnose_timeout_fault()
         raise AxisStateUnknown(
             f"[{label}] Mirror did not report stable (STATUS bit "
             f"{_STATUS_BIT_MIRROR_NOT_STABLE}) within {self._move_timeout:.1f} s, "
             "and this firmware has no documented stop command to fall back "
             "on. Axis state is unknown -- do not issue further moves "
-            "without checking the hardware."
+            f"without checking the hardware. {fault_note}"
+        )
+
+    def _diagnose_timeout_fault(self) -> str:
+        """Best-effort diagnostic read of the board-fault register
+        (_REG_SYSTEM_STATUS_ERRORS) on a wait_for_settle() timeout,
+        folded into the AxisStateUnknown _wait_move() is about to raise.
+        This is diagnosis only -- it never changes the escalation
+        itself. See the module docstring's V4 UPDATE section for why
+        freeze-and-raise (never auto-recover with another move) is still
+        the only response to a timeout, given this firmware has no
+        stop/abort command at all to recover TO.
+
+        A failure here (e.g. the same comm problem that broke settling
+        also breaks this Pro-mode round-trip) is logged and folded into
+        the returned note rather than swallowed -- it must never be
+        mistaken for "no fault found," since a dead diagnostic read is
+        itself evidence something is wrong, just not what.
+        """
+        try:
+            fault_word = self._read_fault_register()
+        except Exception as exc:
+            logger.error(
+                "Settle timeout: diagnostic read of the board-fault "
+                "register also failed (%s) -- communication with the "
+                "MR-E-3 may be down entirely, not just the mirror "
+                "failing to settle.", exc,
+            )
+            return (
+                "Diagnostic read of the board-fault register also "
+                f"failed ({exc}) -- this may be a lost connection, not "
+                "just a stuck mirror."
+            )
+        logger.error(
+            "Settle timeout: board-fault register (0x%04X) = 0x%08X. "
+            "Exact bit layout not confirmed by this project (see module "
+            "docstring) -- cross-reference against Optotune's MRE3Status "
+            "documentation before assuming a specific fault.",
+            _REG_SYSTEM_STATUS_ERRORS, fault_word,
+        )
+        return (
+            f"Board-fault register 0x{_REG_SYSTEM_STATUS_ERRORS:04X} "
+            f"read back 0x{fault_word:08X} at timeout (exact bit layout "
+            "unconfirmed -- log this value for cross-reference against "
+            "Optotune's docs)."
         )
 
     # ------------------------------------------------------------------
@@ -771,6 +889,24 @@ class MR1530Controller(MotionController):
                 f"0x{register_id:04X}, got {len(payload)} bytes: {payload!r}"
             )
         return struct.unpack(">f", payload)[0]
+
+    def _pro_get_uint32(self, register_id: int) -> int:
+        """GET_VALUE(register_id) in Pro mode -> big-endian uint32. Same
+        wire mechanics as _pro_get_float() but for a register that holds
+        a bitmask/integer rather than a measurement (e.g.
+        _REG_SYSTEM_STATUS_ERRORS) -- caller must already be in Pro
+        mode."""
+        frame = self._pro_encode(_PRO_CMD_GET_VALUE, register_id, data=None)
+        self._ser.reset_input_buffer()
+        self._ser.write(frame)
+        raw = self._read_pro_frame()
+        payload = self._pro_decode_get_value(raw, _PRO_CMD_GET_VALUE, register_id)
+        if len(payload) != 4:
+            raise RuntimeError(
+                f"Expected 4-byte payload reading register "
+                f"0x{register_id:04X}, got {len(payload)} bytes: {payload!r}"
+            )
+        return struct.unpack(">I", payload)[0]
 
     @staticmethod
     def _pro_stuff(core: bytes) -> bytes:
