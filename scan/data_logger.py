@@ -19,6 +19,23 @@ oes_store.py), so when this gets revisited, drop the per-point CSVs
 rather than the HDF5 store, once nothing downstream still reads them.
 """
 
+# --- repo-root import bootstrap -------------------------------------------
+# Added PR2b (2026-09-08): this module's __main__ self-check now exercises
+# a local `from scan.oes_store import OESStore` (to build a line-mode store
+# for the new smoke-test block), so `python scan/data_logger.py` needs the
+# repo root on sys.path the same way scan_params.py/scan_manager.py already
+# do for themselves -- see scan_params.py's own copy of this comment for
+# the full rationale. Harmless as an import-time no-op for every OTHER
+# caller of this module (scan_manager.py, gui/), since they already put the
+# repo root on sys.path before importing data_logger.
+import os as _os
+import sys as _sys
+
+_REPO_ROOT = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+if _REPO_ROOT not in _sys.path:
+    _sys.path.insert(0, _REPO_ROOT)
+# ---------------------------------------------------------------------------
+
 import copy
 import csv
 import os
@@ -189,8 +206,20 @@ class DataLogger:
         if wavelengths is not None and intensities is not None:
             self._write_spectrum(point_record["point_id"], wavelengths, intensities)
 
-        # HDF5 write — only if a store is wired up and grid indices are known
-        if self.store is not None and ix is not None and iy is not None:
+        # HDF5 write — only if a store is wired up and this is a real
+        # spatial point, not a reference-point revisit.
+        #
+        # PR2b (2026-09-08): a real LINE-mode point has ix set and iy
+        # ALWAYS None (there's only one spatial index in line mode — see
+        # scan_manager.generate_line_points()/OESStore's line-mode
+        # schema), which is indistinguishable from a reference-point
+        # revisit (also ix=iy=None... except ix is None there too) by
+        # "ix is not None and iy is not None" alone once iy is allowed to
+        # be None on purpose. Ask self.store.mode instead: line mode only
+        # needs ix; grid mode still needs both, exactly as before.
+        if self.store is not None and ix is not None and (
+            iy is not None or self.store.mode == "line"
+        ):
             self.store.write_point(
                 ix=ix,
                 iy=iy,
@@ -228,7 +257,8 @@ class DataLogger:
                 writer.writerow([wl, intens])
 
 
-def build_point_record(point_id, x_mm, y_mm, ir_result, oes_result, feature_values, pass_id=0):
+def build_point_record(point_id, x_mm, y_mm, ir_result, oes_result, feature_values,
+                        pass_id=0, s_mm=None):
     """
     Helper to assemble a flat dict for one scan point, suitable for
     DataLogger.write_point().
@@ -239,6 +269,16 @@ def build_point_record(point_id, x_mm, y_mm, ir_result, oes_result, feature_valu
     pass_id: 0-based index of which full-grid pass this point belongs to
         (see scan.passes in config.yaml). 0 for single-pass scans, so
         existing single-pass CSVs/callers are unaffected.
+    s_mm: PR2b (2026-09-08), LINE MODE only. Arc length along the line
+        from its start point (see scan_manager.generate_line_points()).
+        None (the default) for grid-mode scans and reference-point
+        revisits — the "s_mm" key is only added to the record at all
+        when a real value is given, so grid-mode CSVs/HDF5 records are
+        byte-for-byte unaffected by this parameter's existence. x_mm/
+        y_mm ALWAYS mean real physical millimetres regardless of mode —
+        s_mm is additive, never a replacement for them (see
+        oes_store.py's module docstring for why line mode doesn't just
+        repurpose x_mm/y_mm for this instead).
     """
     record = {
         "point_id": point_id,
@@ -262,6 +302,9 @@ def build_point_record(point_id, x_mm, y_mm, ir_result, oes_result, feature_valu
 
     for name, value in feature_values.items():
         record[f"feature_{name}"] = value
+
+    if s_mm is not None:
+        record["s_mm"] = s_mm
 
     return record
 
@@ -296,3 +339,99 @@ if __name__ == "__main__":
     )
     logger.write_point(record, wavelengths=wl, intensities=intens)
     logger.log_event("Test scan complete")
+
+    # ------------------------------------------------------------------
+    # PR2b (2026-09-08): line mode -- a real point (has s_mm) written
+    # first, then a reference-point-style revisit (ix=iy=None, no s_mm)
+    # written second, confirming _append_summary_row's "header comes
+    # from the first row's keys" convention doesn't break when a LATER
+    # row is missing a key the header has (csv.DictWriter fills blank
+    # for that column rather than raising) -- and that this is safe
+    # specifically because scan_manager.run() always measures point_id=0
+    # as a real point before any reference-point revisit can fire (see
+    # that method's ref_every gating), so a line-mode CSV's header
+    # always includes s_mm to begin with.
+    from scan.oes_store import OESStore
+
+    # Unique per run (not a fixed "./scan_data_test_line") -- this repo's
+    # device-bridge sandbox can't delete files (no rm permission on the
+    # mounted folder), so a fixed dir would accumulate stale APPENDED
+    # rows across repeated `python scan/data_logger.py` runs and break
+    # the exact-row-count assertions below on the second run onward.
+    # resolve_run_dir() (already used by ScanManager for the exact same
+    # "never reuse an output dir" reason) gives each run its own
+    # timestamped folder for free.
+    line_test_dir = resolve_run_dir("./scan_data_test_line")
+    line_test_config = {
+        "output": {
+            "base_dir": line_test_dir,
+            "spectra_subdir": "spectra",
+            "summary_csv": "scan_summary.csv",
+            "metadata_file": "metadata.yaml",
+            "log_file": "scan_log.txt",
+        },
+        "metadata": {"operator": "test"},
+    }
+
+    line_store = OESStore(
+        os.path.join(line_test_dir, "oes.h5"), mode="line",
+        s_coords_mm=[0.0, 10.0, 20.0], line_x_mm=[0.0, 6.0, 12.0],
+        line_y_mm=[0.0, 8.0, 16.0], start_mm=(0.0, 0.0), end_mm=(12.0, 16.0),
+        n_passes=1,
+    )
+    line_logger = DataLogger(line_test_config, store=line_store)
+    line_logger.write_metadata()
+
+    # Mirrors EXACTLY what ScanManager._measure_point() does to every
+    # record regardless of mode -- build_point_record() then
+    # record["is_reference"] = ... unconditionally -- so this test
+    # exercises the real key-set shape, not a simplified one. The point
+    # of this test is the PR2b fix in scan_manager.py's reference-point
+    # revisit call: it now always passes s_mm (NaN for a reference
+    # point in line mode, never omitted) specifically so every row in a
+    # line-mode scan has an IDENTICAL key set -- otherwise
+    # DataLogger._append_summary_row() (which recomputes CSV fieldnames
+    # from EACH row's own keys, not fixed from the first row) would
+    # silently shift every column after a row with a different key set,
+    # exactly the bug class this same file's motion_error_detail
+    # comment already warns about for a different field.
+    real_record = build_point_record(
+        point_id=0, x_mm=6.0, y_mm=8.0,
+        ir_result={"value": 900.0, "emissivity": 0.8, "dilution": None, "error": False},
+        oes_result={"saturated": False, "error": False},
+        feature_values={"CH": 100.0},
+        s_mm=10.0,
+    )
+    real_record["is_reference"] = False
+    assert "s_mm" in real_record
+    line_logger.write_point(real_record, wavelengths=wl, intensities=intens, ix=1, iy=None)
+
+    ref_record = build_point_record(
+        point_id=1, x_mm=0.0, y_mm=0.0,
+        ir_result={"value": 899.0, "emissivity": 0.8, "dilution": None, "error": False},
+        oes_result={"saturated": False, "error": False},
+        feature_values={"CH": 99.0},
+        s_mm=float("nan"),  # NOT omitted -- see comment above
+    )
+    ref_record["is_reference"] = True
+    assert "s_mm" in ref_record
+    line_logger.write_point(ref_record, wavelengths=wl, intensities=intens, ix=None, iy=None)
+
+    import csv as _csv
+    with open(os.path.join(line_test_dir, "scan_summary.csv"), newline="") as f:
+        rows = list(_csv.DictReader(f))
+    assert len(rows) == 2
+    # Both rows have the SAME key set -> both keyed correctly by column,
+    # no shift -- x_mm/y_mm land in the right columns on BOTH rows, not
+    # just the first.
+    assert rows[0]["s_mm"] == "10.0" and rows[0]["x_mm"] == "6.0" and rows[0]["is_reference"] == "False"
+    assert rows[1]["s_mm"] == "nan" and rows[1]["x_mm"] == "0.0" and rows[1]["is_reference"] == "True"
+
+    ds_line = OESStore.load(os.path.join(line_test_dir, "oes.h5"))
+    assert not np.isnan(ds_line.ir_temp_c.isel(s_mm=1).values), (
+        "the real line point (ix=1) should have been written to the HDF5 store")
+    assert np.isnan(ds_line.ir_temp_c.isel(s_mm=0).values), (
+        "the reference-point revisit must NOT have been written into the line store "
+        "(ix=None -- write_point's mode-aware skip condition should have caught it)")
+
+    print("data_logger line-mode smoke test OK")

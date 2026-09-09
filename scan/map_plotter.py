@@ -93,6 +93,114 @@ def plot_map(xs, ys, grid, title, output_path, cmap="viridis", label=None):
     print(f"Saved {output_path}")
 
 
+def line_values_from_points(df, value_col):
+    """
+    PR2b (2026-09-08): line-mode counterpart to grid_from_points()
+    above. A line scan's points don't form a 2D grid -- there's one
+    real spatial axis, s_mm (arc length along the line; see
+    scan_manager.generate_line_points() and oes_store.py's line-mode
+    schema) -- so this returns (s_mm, values) sorted by position,
+    instead of a 2D array. Requires an "s_mm" column, present in
+    scan_summary.csv only for line-mode scans (see
+    data_logger.build_point_record()'s s_mm parameter).
+    """
+    sorted_df = df.sort_values("s_mm")
+    return sorted_df["s_mm"].to_numpy(), sorted_df[value_col].to_numpy()
+
+
+def plot_line(s_mm, values, title, output_path, ylabel=None):
+    """
+    PR2b (2026-09-08): line-mode counterpart to plot_map() above --
+    same Figure/FigureCanvasAgg pure-offscreen pattern (see this
+    module's docstring for why that matters here specifically), same
+    savefig/print convention, but a position-vs-value line plot instead
+    of imshow() -- this is the "Temperature versus position" /
+    "Selected OES feature versus position" plot the original spec (2D
+    Project.docx, Phase 6) asks for, which plot_map() alone could never
+    produce (it unconditionally calls imshow(), even for today's
+    axis-aligned line scans -- see the PR2b design writeup in the
+    project gap-analysis doc for this gap).
+    """
+    fig = Figure(figsize=(6, 5))
+    FigureCanvasAgg(fig)
+    ax = fig.add_subplot(111)
+    ax.plot(s_mm, values, marker="o", markersize=3, linewidth=1)
+    ax.set_xlabel("Position along line, s (mm)")
+    if ylabel:
+        ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(output_path, dpi=150)
+    print(f"Saved {output_path}")
+
+
+def _generate_line_maps(df, maps_dir):
+    """
+    PR2b (2026-09-08): line-mode sibling of generate_all_maps()'s body
+    below -- same set of quantities (temperature, emissivity, dilution,
+    per-feature, total intensity, the C2 Swan/H-alpha ratio), same
+    "skip loud" convention for anything missing, just plotted with
+    plot_line()/line_values_from_points() instead of
+    plot_map()/grid_from_points(). Kept as a separate function (rather
+    than threading an if/else through every block below) so neither
+    mode's logic has to read through the other's branches to follow
+    what actually happens for its own case.
+    """
+    s_mm, values = line_values_from_points(df, "ir_temp_c")
+    plot_line(s_mm, values, "Substrate Temperature vs. Position",
+              os.path.join(maps_dir, "temperature_line.png"), ylabel="Temperature (C)")
+
+    if "ir_emissivity" in df.columns:
+        s_mm, values = line_values_from_points(df, "ir_emissivity")
+        plot_line(s_mm, values, "Pyrometer Emissivity vs. Position",
+                  os.path.join(maps_dir, "emissivity_line.png"), ylabel="Emissivity")
+    else:
+        print("NOTE: skipping emissivity line plot — 'ir_emissivity' column not found "
+              "in scan_summary.csv (older scan, run before 2026-07-21).")
+
+    if "ir_dilution" in df.columns and df["ir_dilution"].notna().any():
+        s_mm, values = line_values_from_points(df, "ir_dilution")
+        plot_line(s_mm, values, "Pyrometer Signal Dilution vs. Position",
+                  os.path.join(maps_dir, "dilution_line.png"), ylabel="Dilution")
+    else:
+        print("NOTE: skipping dilution line plot — 'ir_dilution' is missing or all-NaN. "
+              "Set ir.pac.dilution_tag_name in config.yaml once the real REST tag "
+              "name is confirmed (tools/list_pac_strategy_vars.py can help find it).")
+
+    feature_cols = [c for c in df.columns if c.startswith("feature_")]
+    for col in feature_cols:
+        feature_name = col.replace("feature_", "")
+        s_mm, values = line_values_from_points(df, col)
+        plot_line(s_mm, values, f"{feature_name} Intensity vs. Position",
+                  os.path.join(maps_dir, f"{feature_name}_line.png"), ylabel="Intensity (a.u.)")
+
+    if feature_cols:
+        df = df.copy()
+        df["total_intensity"] = df[feature_cols].sum(axis=1)
+        s_mm, values = line_values_from_points(df, "total_intensity")
+        plot_line(s_mm, values, "Total OES Intensity vs. Position",
+                  os.path.join(maps_dir, "total_intensity_line.png"),
+                  ylabel="Summed Intensity (a.u.)")
+
+    if "feature_C2_Swan" in df.columns and "feature_H_alpha" in df.columns:
+        df = df.copy()
+        with np.errstate(divide="ignore", invalid="ignore"):
+            df["ratio_C2_Halpha"] = df["feature_C2_Swan"] / df["feature_H_alpha"]
+        s_mm, values = line_values_from_points(df, "ratio_C2_Halpha")
+        plot_line(s_mm, values, "C2 Swan / H-alpha Ratio vs. Position",
+                  os.path.join(maps_dir, "ratio_C2_Halpha_line.png"), ylabel="Ratio")
+    else:
+        print(
+            "NOTE: skipping C2 Swan / H-alpha ratio line plot — expected columns "
+            "'feature_C2_Swan' and 'feature_H_alpha' not found in "
+            "scan_summary.csv. This ratio is hardcoded to those two feature "
+            "names; if oes.features in config.yaml uses different names (or "
+            "omits one of these), this plot is intentionally skipped, not broken."
+        )
+
+
 def generate_all_maps(config):
     out_cfg = config["output"]
     base_dir = out_cfg["base_dir"]
@@ -101,6 +209,21 @@ def generate_all_maps(config):
     os.makedirs(maps_dir, exist_ok=True)
 
     df = load_scan_summary(summary_path)
+
+    # PR2b (2026-09-08): line-mode scans branch off entirely here, into
+    # _generate_line_maps() -- everything below this point (grid_from_points()/
+    # plot_map(), the multi-pass warning, every "skip loud" note) assumes
+    # a 2D (x_mm, y_mm) grid, which a line scan's points never form (see
+    # oes_store.py's module docstring for why an arbitrary-angle line
+    # can't be reshaped into one). scan_cfg["grid"]["mode"] is the
+    # authoritative signal -- not "does an s_mm column exist" -- because
+    # it's set at scan time regardless of whether map generation ever
+    # runs, matching how ScanManager itself decides which geometry
+    # generator to call.
+    scan_mode = config.get("scan", {}).get("grid", {}).get("mode", "grid")
+    if scan_mode == "line":
+        _generate_line_maps(df, maps_dir)
+        return
 
     # grid_from_points() below keys each cell by (x_mm, y_mm) alone and
     # just overwrites on collision -- for a scan.passes > 1 run (see
@@ -186,12 +309,86 @@ def generate_all_maps(config):
         )
 
 
+def _self_test():
+    """
+    PR2b (2026-09-08): synthetic-data smoke test for the new line-mode
+    path (plot_line()/line_values_from_points()/_generate_line_maps()/
+    generate_all_maps()'s mode branch) -- this file had no self-check
+    convention before this (unlike scan_params.py/data_logger.py/
+    oes_store.py/live_map_accumulator.py, all of which do; see the
+    2026-08-05 test-coverage-gap finding this codebase already tracks),
+    so `python scan/map_plotter.py --self-test` is new, opt-in, and
+    does NOT change the file's default behavior (no flags still runs
+    generate_all_maps() against config.yaml, exactly as before this
+    function existed).
+    """
+    import shutil
+    import tempfile
+
+    import pandas as pd
+
+    print("Running map_plotter self-test (line mode)...")
+    tmp_dir = tempfile.mkdtemp(prefix="map_plotter_selftest_")
+    try:
+        n = 6
+        s_mm = np.linspace(0.0, 10.0, n)
+        df = pd.DataFrame({
+            "point_id": range(n),
+            "pass_id": [0] * n,
+            "x_mm": np.linspace(0.0, 6.0, n),
+            "y_mm": np.linspace(0.0, 8.0, n),
+            "s_mm": s_mm,
+            "is_reference": [False] * n,
+            "ir_temp_c": 900.0 + s_mm,
+            "ir_emissivity": [0.85] * n,
+            "ir_dilution": [float("nan")] * n,  # unset tag name -- must skip loud, not crash
+            "feature_C2_Swan": np.linspace(100.0, 200.0, n),
+            "feature_H_alpha": np.linspace(50.0, 60.0, n),
+        })
+        summary_path = os.path.join(tmp_dir, "scan_summary.csv")
+        df.to_csv(summary_path, index=False)
+
+        config = {
+            "scan": {"grid": {"mode": "line"}},
+            "output": {"base_dir": tmp_dir, "summary_csv": "scan_summary.csv"},
+        }
+        generate_all_maps(config)
+
+        maps_dir = os.path.join(tmp_dir, "maps")
+        expected = [
+            "temperature_line.png", "emissivity_line.png", "C2_Swan_line.png",
+            "H_alpha_line.png", "total_intensity_line.png", "ratio_C2_Halpha_line.png",
+        ]
+        for filename in expected:
+            path = os.path.join(maps_dir, filename)
+            assert os.path.exists(path) and os.path.getsize(path) > 0, f"missing or empty: {path}"
+
+        # dilution_line.png must NOT exist -- ir_dilution is all-NaN in
+        # this synthetic data, same "skip loud, don't crash" behavior
+        # grid mode already has for the same column.
+        assert not os.path.exists(os.path.join(maps_dir, "dilution_line.png"))
+
+        # line_values_from_points() itself: sorted by s_mm, values follow.
+        s_sorted, values = line_values_from_points(df, "ir_temp_c")
+        assert list(s_sorted) == sorted(s_mm)
+        assert abs(values[0] - 900.0) < 1e-9 and abs(values[-1] - 910.0) < 1e-9
+
+        print(f"map_plotter self-test OK -- {len(expected)} line plots generated in {maps_dir}")
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 if __name__ == "__main__":
-    import yaml
+    import sys
 
-    # utf-8-sig: see run_gui.py's copy of this comment -- tolerates/strips a
-    # UTF-8 BOM (e.g. from editing config.yaml in Notepad on Windows).
-    with open("config.yaml", encoding="utf-8-sig") as f:
-        config = yaml.safe_load(f)
+    if "--self-test" in sys.argv:
+        _self_test()
+    else:
+        import yaml
 
-    generate_all_maps(config)
+        # utf-8-sig: see run_gui.py's copy of this comment -- tolerates/strips a
+        # UTF-8 BOM (e.g. from editing config.yaml in Notepad on Windows).
+        with open("config.yaml", encoding="utf-8-sig") as f:
+            config = yaml.safe_load(f)
+
+        generate_all_maps(config)

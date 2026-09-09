@@ -152,6 +152,92 @@ class MapAccumulator:
         return ix, iy
 
 
+class LineAccumulator:
+    """
+    PR2b (2026-09-08): line-mode counterpart to MapAccumulator above.
+
+    MapAccumulator needs a rectangular (x_range_mm, y_range_mm,
+    step_size_mm) to build its 2D binning grid from -- none of those
+    exist for an arbitrary-angle line (see scan_manager.generate_line_points()
+    and oes_store.py's line-mode schema for why: a line's only real
+    spatial axis is s_mm, arc length from its start point, not two
+    independent x/y ranges). This exists instead of trying to force a
+    line scan through MapAccumulator, which corrects an earlier looser
+    claim (in the project gap-analysis doc) that gui/live_map.py
+    "likely needs no change" for line mode -- it does, via this class.
+
+    Same running-mean-plus-read-count shape as MapAccumulator, just
+    over a 1D array indexed by nearest s_mm position instead of a 2D
+    nearest-cell snap -- gui/line_scan_panel.py's live view reads
+    value_grid/read_count the same way gui/live_map.py already reads
+    MapAccumulator's, just plotted as a line/scatter (x=s_mm) instead
+    of an imshow() heatmap.
+    """
+
+    def __init__(self, start_mm, end_mm, n_points):
+        self.reset(start_mm, end_mm, n_points)
+
+    def reset(self, start_mm, end_mm, n_points):
+        """
+        Rebuild the backing arrays from scratch -- call at the start of
+        every line scan, mirroring MapAccumulator.reset().
+        """
+        x0, y0 = start_mm
+        x1, y1 = end_mm
+        self.start_mm = (float(x0), float(y0))
+        self.end_mm = (float(x1), float(y1))
+        self.n_points = int(n_points)
+
+        length_mm = float(np.hypot(x1 - x0, y1 - y0))
+        self.s_values = np.linspace(0.0, length_mm, self.n_points) if self.n_points > 1 \
+            else np.array([0.0])
+
+        self.value_grid = np.full(self.n_points, np.nan)
+        self._valid_count = np.zeros(self.n_points, dtype=int)
+        self.read_count = np.zeros(self.n_points, dtype=int)
+
+    def nearest_index(self, s_mm):
+        """
+        Snap s_mm to the nearest index along the line. Returns None if
+        s_mm is missing (e.g. a reference-point revisit, which carries
+        NaN s_mm in line mode -- see scan_manager.py's reference-point
+        handling -- or, for a non-line record fed here by mistake, a
+        genuinely missing key).
+        """
+        if s_mm is None:
+            return None
+        try:
+            if np.isnan(s_mm):
+                return None
+        except TypeError:
+            return None
+        return int(np.argmin(np.abs(self.s_values - s_mm)))
+
+    def add_reading(self, s_mm, value):
+        """
+        Bin one (s_mm, value) reading into its nearest index, updating
+        that index's running mean and read count in place. Same NaN/
+        None-tolerant semantics as MapAccumulator.add_reading() -- see
+        that method's docstring.
+
+        Returns the index the reading landed in, or None if s_mm was
+        missing/NaN.
+        """
+        i = self.nearest_index(s_mm)
+        if i is None:
+            return None
+        self.read_count[i] += 1
+
+        if _is_valid(value):
+            n = self._valid_count[i] + 1
+            self._valid_count[i] = n
+            prev = self.value_grid[i]
+            prev = 0.0 if np.isnan(prev) else prev
+            self.value_grid[i] = prev + (value - prev) / n
+
+        return i
+
+
 if __name__ == "__main__":
     # Smoke test -- no tkinter/hardware involved, just the accumulation math.
     acc = MapAccumulator(x_range_mm=[0, 4], y_range_mm=[0, 4], step_size_mm=2.0)
@@ -191,3 +277,47 @@ if __name__ == "__main__":
     assert acc.read_count[2, 2] == 0
 
     print("live_map_accumulator smoke test OK")
+
+    # ------------------------------------------------------------------
+    # PR2b (2026-09-08): LineAccumulator
+    # ------------------------------------------------------------------
+    # A 3-4-5 triangle again (see scan_manager.py's own generate_line_points()
+    # regression, scan_params.py __main__) so s_values land on clean numbers.
+    line_acc = LineAccumulator(start_mm=(0.0, 0.0), end_mm=(3.0, 4.0), n_points=6)
+    assert line_acc.value_grid.shape == (6,)
+    assert line_acc.read_count.shape == (6,)
+    assert np.all(np.isnan(line_acc.value_grid))
+    assert abs(float(line_acc.s_values[-1]) - 5.0) < 1e-9  # length of a 3-4-5 triangle
+
+    # A reading exactly at s_mm=0 (line start).
+    i0 = line_acc.add_reading(0.0, 900.0)
+    assert i0 == 0
+    assert line_acc.value_grid[0] == 900.0
+    assert line_acc.read_count[0] == 1
+
+    # A second reading at the SAME s_mm -- running average, count increments.
+    line_acc.add_reading(0.0, 902.0)
+    assert line_acc.value_grid[0] == 901.0
+    assert line_acc.read_count[0] == 2
+
+    # A NaN reading -- read_count still increments, mean unaffected.
+    line_acc.add_reading(0.0, float("nan"))
+    assert line_acc.value_grid[0] == 901.0
+    assert line_acc.read_count[0] == 3
+
+    # A reading that lands off-grid-point snaps to the nearest s_mm index.
+    i_near = line_acc.add_reading(0.9, 850.0)
+    assert i_near == 1, i_near  # nearest to s_mm=1.0 (step is 1.0mm for n=6 over length 5)
+    assert line_acc.value_grid[1] == 850.0
+
+    # A reference-point revisit (NaN s_mm, per scan_manager.py's line-mode
+    # handling -- see that module's comment) is a no-op, not an error.
+    assert line_acc.add_reading(float("nan"), 999.0) is None
+    assert line_acc.add_reading(None, 999.0) is None
+    assert line_acc.read_count[0] == 3  # unchanged
+
+    # An unvisited index stays blank (NaN), per spec.
+    assert np.isnan(line_acc.value_grid[5])
+    assert line_acc.read_count[5] == 0
+
+    print("live_map_accumulator LineAccumulator smoke test OK")

@@ -15,18 +15,24 @@ worker thread never receives a reference to any widget -- it only
 ever gets the config dict, the queue, the stop_event, and (see below)
 an optional already-connected motion controller.
 
-Three tabs, one window: "Calibrate" (gui/calibration_panel.py), "Scan"
+Four tabs, one window: "Calibrate" (gui/calibration_panel.py), "Scan"
 (the ControlPanel/StatusPanel/LiveMapPanel trio that already existed
-here), and "Adaptive Scan" (gui/adaptive_scan_panel.py). Calibration and
-Scan share this one App instance so a motion controller connected and
-homed on the Calibrate tab can be handed straight to a scan without a
-second hardware connection or a redundant re-home -- see
-_handle_calibrated()/start_scan() below and ScanManager's
-motion=/already_homed= params. Adaptive Scan does NOT participate in that
-hand-off -- it opens its own, independent motion/reader connection (see
+here), "Line Scan" (gui/line_scan_panel.py, PR2b -- an arbitrary-angle
+1D line scan, added 2026-09-08), and "Adaptive Scan"
+(gui/adaptive_scan_panel.py). Calibration, Scan, and Line Scan all
+share this one App instance's motion hand-off so a motion controller
+connected and homed on the Calibrate tab can be handed straight to a
+scan -- either kind -- without a second hardware connection or a
+redundant re-home. See _handle_calibrated()/_take_shared_motion()
+below and ScanManager's motion=/already_homed= params; Line Scan
+consumes this exactly the way start_scan() does, via
+_take_shared_motion() (see gui/line_scan_panel.py's docstring for why
+it shares this hand-off rather than opening its own connection, unlike
+Adaptive Scan). Adaptive Scan does NOT participate in that hand-off --
+it opens its own, independent motion/reader connection (see
 gui/adaptive_scan_panel.py's docstring for why) -- so it only needs its
 own shutdown() called alongside the Calibrate tab's, not a place in the
-Calibrate -> Scan hand-off chain.
+Calibrate -> Scan/Line Scan hand-off chain.
 """
 
 import queue
@@ -41,6 +47,7 @@ from gui.status_panel import StatusPanel
 from gui.live_map import LiveMapPanel
 from gui.scan_worker import run_scan
 from gui.adaptive_scan_panel import AdaptiveScanPanel
+from gui.line_scan_panel import LineScanPanel
 from scan.scan_manager import generate_grid
 from scan.scan_params import PASSES_DEFAULT, validate_passes
 
@@ -66,11 +73,13 @@ class App(tk.Tk):
         # today's behavior, unaffected by any of this). See
         # _handle_calibrated() and ScanManager's `motion=` param.
         self.motion = None
-        # One-shot flag: True only for the very next start_scan() call
-        # right after a hand-off, then consumed (reset False) regardless
-        # of outcome -- a second scan later in the same session goes
-        # through ScanManager's normal rehome-at-start logic instead of
-        # skipping it forever just because a motion object is being reused.
+        # One-shot flag: True only for the very next start_scan() (or
+        # LineScanPanel start, via _take_shared_motion()) call right
+        # after a hand-off, then consumed (reset False) regardless of
+        # outcome -- a second scan later in the same session, on either
+        # tab, goes through ScanManager's normal rehome-at-start logic
+        # instead of skipping it forever just because a motion object is
+        # being reused.
         self._pending_already_homed = False
 
         self.columnconfigure(0, weight=1)
@@ -103,6 +112,12 @@ class App(tk.Tk):
         self.status.grid(row=1, column=0, sticky="n")
         self.live_map.grid(row=0, column=1, rowspan=2, sticky="nsew")
 
+        # PR2b (2026-09-08): shares the Calibrate/Scan motion hand-off
+        # via _take_shared_motion() -- see this class's own docstring and
+        # gui/line_scan_panel.py's for why.
+        self.line_scan = LineScanPanel(self.notebook, config, take_shared_motion=self._take_shared_motion)
+        self.notebook.add(self.line_scan, text="Line Scan")
+
         # Independent of the Calibrate/Scan hand-off -- see this class's
         # own docstring and gui/adaptive_scan_panel.py's for why.
         self.adaptive_scan = AdaptiveScanPanel(self.notebook, config)
@@ -120,17 +135,35 @@ class App(tk.Tk):
         size, dwell time, passes, and deg_per_mm_x/y if recalibrated).
         `motion` is that tab's already-connected, already-homed
         controller; adopting it here (rather than discarding it) is what
-        lets the very next scan skip a redundant second home().
+        lets the very next scan -- Scan tab or Line Scan tab -- skip a
+        redundant second home().
         """
         self.motion = motion
         self._pending_already_homed = already_homed
 
         self.control.load_config(config)
+        self.line_scan.load_config(config)
         grid_cfg = config["scan"]["grid"]
         self.live_map.reset(grid_cfg["x_range_mm"], grid_cfg["y_range_mm"], grid_cfg["step_size_mm"])
 
         self.notebook.select(1)  # jump to the Scan tab
         self.status.log_message("Calibration complete — scan parameters refreshed from config.yaml.")
+
+    def _take_shared_motion(self):
+        """
+        One-shot hand-off accessor shared by start_scan() (below) and
+        LineScanPanel -- returns (self.motion, already_homed) and
+        consumes _pending_already_homed (reset to False) regardless of
+        outcome, exactly the inline logic start_scan() used before this
+        method existed. self.motion itself is NOT one-shot -- both the
+        Scan tab and the Line Scan tab keep reusing the same connection
+        across as many runs as the operator starts, only the
+        "already homed" claim is single-use.
+        """
+        motion = self.motion
+        already_homed = self._pending_already_homed
+        self._pending_already_homed = False
+        return motion, already_homed
 
     def start_scan(self, effective_config):
         if self.running:
@@ -163,9 +196,7 @@ class App(tk.Tk):
         # before this tab existed. already_homed is consumed here
         # (one-shot) regardless of whether the scan actually starts
         # successfully, so it can never apply to a later scan.
-        motion = self.motion
-        already_homed = self._pending_already_homed
-        self._pending_already_homed = False
+        motion, already_homed = self._take_shared_motion()
 
         self.worker = threading.Thread(
             target=run_scan,
@@ -226,7 +257,13 @@ class App(tk.Tk):
         # ever consumed it) the one this App itself is holding, or the
         # Adaptive Scan tab's own independent connection (see that
         # panel's docstring for why it's not part of this same hand-off).
+        # Line Scan is stopped here too (its worker may still be using
+        # the shared self.motion below), but -- unlike Adaptive Scan --
+        # it never owns that connection, so its shutdown() only stops a
+        # running scan and never closes anything itself; see
+        # gui/line_scan_panel.py's shutdown() docstring for why.
         self.calibration.shutdown()
+        self.line_scan.shutdown()
         self.adaptive_scan.shutdown()
         if self.motion is not None:
             close = getattr(self.motion, "close", None)

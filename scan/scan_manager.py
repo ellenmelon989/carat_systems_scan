@@ -205,6 +205,66 @@ def solve_step_size_for_target_points(center_mm, radius_mm, target_n_points,
     return step_rounded, n_rounded, True
 
 
+def generate_line_points(start_mm, end_mm, n_points: int):
+    """
+    PR2b (2026-09-04, endpoint math added 2026-09-08): generate
+    n_points evenly-spaced points along the straight segment from
+    start_mm to end_mm (both (x_mm, y_mm) pairs), inclusive of both
+    endpoints. Returns a list of (i, x_mm, y_mm, s_mm) tuples -- i is
+    the 0-based index along the line (the line-mode counterpart to
+    generate_grid()'s ix/iy), s_mm is arc length from start_mm (0.0 at
+    start_mm, the full line length at end_mm).
+
+    Closed-form -- step_mm = length_mm / (n_points - 1) -- unlike
+    solve_step_size_for_target_points()'s bisection: a line's point
+    count and spacing are exactly and uniquely determined by its two
+    endpoints and the target count, no masking or grid quantization
+    involved (see the PR2 scope writeup in the project gap-analysis doc
+    for why the circular case needed bisection and this one doesn't).
+
+    s_mm is the ONE queryable spatial coordinate axis oes_store.py
+    stores for a line-mode scan -- NEVER x_mm/y_mm, which stay real
+    physical millimetres everywhere in this codebase and would be
+    actively misleading if repurposed to mean "distance along the
+    line" (see oes_store.py's module docstring and the PR2b design
+    writeup for the four call sites that assume x_mm/y_mm are real).
+    An arbitrary-angle line's x_mm and y_mm are NOT independent axes
+    the way a rectangular grid's are -- each point's x_mm/y_mm is
+    jointly determined by s_mm, not separately addressable -- which is
+    exactly why generate_grid()'s (nx,)/(ny,) tensor-product HDF5
+    layout can't represent this and s_mm exists.
+
+    n_points=1 returns a single point at start_mm (s_mm=0.0, i=0) --
+    same "a degenerate range collapses to one point" convention
+    scan_params.grid_dims_from_range() already uses for a zero-width
+    grid axis.
+
+    Does NOT validate against a calibrated wafer or motion.soft_limits
+    -- both are checked elsewhere (in_radius() on start_mm/end_mm in
+    gui/line_scan_panel.py before this is ever called; every point this
+    returns is later re-checked against motion.soft_limits by
+    preflight_check() below, same as every grid point already is).
+    """
+    if n_points < 1:
+        raise ValueError(f"n_points must be >= 1, got {n_points}")
+
+    x0, y0 = start_mm
+    x1, y1 = end_mm
+
+    if n_points == 1:
+        return [(0, float(x0), float(y0), 0.0)]
+
+    length_mm = float(np.hypot(x1 - x0, y1 - y0))
+    points = []
+    for i in range(n_points):
+        t = i / (n_points - 1)
+        x = x0 + t * (x1 - x0)
+        y = y0 + t * (y1 - y0)
+        s = t * length_mm
+        points.append((i, float(x), float(y), float(s)))
+    return points
+
+
 def compute_commanded_points(scan_cfg):
     """
     Build the COMPLETE list of (label, x_mm, y_mm) positions this scan
@@ -222,9 +282,30 @@ def compute_commanded_points(scan_cfg):
     useful fast-iteration tool on its own: verifying a config's commanded
     positions doesn't require running an actual scan (minutes to hours,
     real hardware) to find out a soft limit or calibration is wrong.
+
+    PR2b (2026-09-08): branches on scan_cfg["grid"].get("mode", "grid").
+    Line mode's points come from generate_line_points() instead of
+    generate_grid() -- every point it returns still gets checked against
+    motion.soft_limits below exactly the same way, which is what makes
+    this the right (and only) place a line scan's wafer-shape validation
+    would need supplementing if that were needed here too. It isn't: a
+    rectangle (motion.soft_limits) is convex just like a circle
+    (wafer_radius_mm) is, but this function isn't the one relying on
+    that -- gui/line_scan_panel.py's own two-endpoint in_radius() check
+    is (see that panel's docstring) -- this function already checks
+    every generated point regardless of mode, same as it always has.
     """
-    points, _, _ = generate_grid(scan_cfg)
-    commanded = [(f"grid point (ix={ix}, iy={iy})", x, y) for ix, iy, x, y in points]
+    mode = scan_cfg["grid"].get("mode", "grid")
+    if mode == "line":
+        line_points = generate_line_points(
+            scan_cfg["grid"]["line_start_mm"],
+            scan_cfg["grid"]["line_end_mm"],
+            scan_cfg["grid"]["line_n_points"],
+        )
+        commanded = [(f"line point (i={i})", x, y) for i, x, y, _s in line_points]
+    else:
+        points, _, _ = generate_grid(scan_cfg)
+        commanded = [(f"grid point (ix={ix}, iy={iy})", x, y) for ix, iy, x, y in points]
 
     ref_cfg = scan_cfg.get("reference_point", {})
     if ref_cfg.get("enabled", False):
@@ -405,14 +486,37 @@ class ScanManager:
         # n_passes must be given upfront so the pass axis can be
         # pre-allocated (see oes_store.py) — a later pass overwriting a
         # smaller array would silently discard earlier passes' data.
-        _, xs, ys = generate_grid(self.scan_cfg)
+        #
+        # PR2b (2026-09-08): self.scan_mode ("grid" or "line") is read
+        # once here and reused by run()/_measure_point below, rather
+        # than re-reading scan_cfg["grid"]["mode"] in three places --
+        # same reason self.passes is resolved once in __init__ instead
+        # of at every use site.
+        self.scan_mode = self.scan_cfg["grid"].get("mode", "grid")
         hdf5_path = config["output"].get(
             "oes_hdf5",
             config["output"]["base_dir"] + "/oes.h5",
         )
-        self.store = OESStore(hdf5_path, x_coords_mm=xs, y_coords_mm=ys,
-                               n_passes=self.passes,
-                               wavelengths=self.spectrometer.wavelengths)
+        if self.scan_mode == "line":
+            line_start_mm = tuple(self.scan_cfg["grid"]["line_start_mm"])
+            line_end_mm = tuple(self.scan_cfg["grid"]["line_end_mm"])
+            line_n_points = self.scan_cfg["grid"]["line_n_points"]
+            line_points = generate_line_points(line_start_mm, line_end_mm, line_n_points)
+            s_coords = np.array([s for _i, _x, _y, s in line_points], dtype="float32")
+            line_x = np.array([x for _i, x, _y, _s in line_points], dtype="float32")
+            line_y = np.array([y for _i, _x, y, _s in line_points], dtype="float32")
+            self.store = OESStore(
+                hdf5_path, mode="line",
+                s_coords_mm=s_coords, line_x_mm=line_x, line_y_mm=line_y,
+                start_mm=line_start_mm, end_mm=line_end_mm,
+                n_passes=self.passes,
+                wavelengths=self.spectrometer.wavelengths,
+            )
+        else:
+            _, xs, ys = generate_grid(self.scan_cfg)
+            self.store = OESStore(hdf5_path, mode="grid", x_coords_mm=xs, y_coords_mm=ys,
+                                   n_passes=self.passes,
+                                   wavelengths=self.spectrometer.wavelengths)
 
         self.logger = DataLogger(config, store=self.store)
 
@@ -521,7 +625,25 @@ class ScanManager:
             self._safe_rehome("scan start")
         self.spectrometer.set_integration_time(self.oes_cfg["integration_time_us"])
 
-        points, _, _ = generate_grid(self.scan_cfg)
+        # PR2b (2026-09-08): normalize both modes to the same
+        # (ix, iy, x, y, s_mm) shape so the rest of run() below (rehome/
+        # reference-point cadence, stop_event check, point_id bookkeeping)
+        # doesn't need to know or care which mode is active. Grid mode:
+        # iy is the real grid index, s_mm is always None. Line mode: ix
+        # is the line index i, iy is always None (the sentinel
+        # DataLogger.write_point()/OESStore use to tell "line mode, one
+        # spatial axis" apart from a grid point), s_mm is the arc-length
+        # position generate_line_points() computed.
+        if self.scan_mode == "line":
+            grid_cfg = self.scan_cfg["grid"]
+            line_points = generate_line_points(
+                tuple(grid_cfg["line_start_mm"]), tuple(grid_cfg["line_end_mm"]),
+                grid_cfg["line_n_points"],
+            )
+            points = [(i, None, x, y, s) for i, x, y, s in line_points]
+        else:
+            grid_points, _, _ = generate_grid(self.scan_cfg)
+            points = [(ix, iy, x, y, None) for ix, iy, x, y in grid_points]
         ref_cfg = self.scan_cfg.get("reference_point", {})
         ref_enabled = ref_cfg.get("enabled", False)
         ref_every = ref_cfg.get("revisit_every_n_points", 0)
@@ -546,13 +668,14 @@ class ScanManager:
                 if self.passes > 1:
                     self.logger.log_event(f"Starting pass {pass_id + 1}/{self.passes}")
 
-                for ix, iy, x, y in points:
+                for ix, iy, x, y, s_mm in points:
                     if stop_event is not None and stop_event.is_set():
                         self.logger.log_event(f"Scan aborted by operator after point {point_id} "
                                                f"(pass {pass_id + 1}/{self.passes})")
                         return "aborted"
 
-                    self._measure_point(point_id, ix, iy, x, y, pass_id=pass_id, on_point=on_point)
+                    self._measure_point(point_id, ix, iy, x, y, pass_id=pass_id,
+                                         s_mm=s_mm, on_point=on_point)
                     point_id += 1
 
                     if rehome_enabled and rehome_every > 0 and point_id % rehome_every == 0:
@@ -564,10 +687,29 @@ class ScanManager:
                     if ref_enabled and ref_every > 0 and point_id % ref_every == 0:
                         self.logger.log_event(f"Revisiting reference point {ref_position} "
                                                f"after point {point_id}")
-                        # Reference points don't belong to the spatial grid — skip HDF5 write
+                        # Reference points don't belong to the spatial grid — skip HDF5 write.
+                        #
+                        # PR2b (2026-09-08): in LINE mode, still pass s_mm
+                        # (NaN, "not applicable") rather than leaving it
+                        # None/omitted. build_point_record() only adds the
+                        # "s_mm" dict key when a value is given -- if this
+                        # reference row omitted it while every REAL line
+                        # point's row includes it, the two rows would have
+                        # different key sets, and DataLogger._append_summary_row()
+                        # recomputes the CSV fieldnames from EACH row's own
+                        # keys (not fixed from the first row), so a later
+                        # row with a different key set silently shifts
+                        # every column after the missing one -- exactly the
+                        # "misalign every column after it" bug class
+                        # motion_error_detail's own comment above already
+                        # guards against for a different field. NaN (not
+                        # omission) keeps every line-mode row's schema
+                        # identical, same fix, same reasoning.
+                        ref_s_mm = float("nan") if self.scan_mode == "line" else None
                         self._measure_point(point_id, None, None,
                                             ref_position[0], ref_position[1],
-                                            pass_id=pass_id, is_reference=True, on_point=on_point)
+                                            pass_id=pass_id, is_reference=True,
+                                            s_mm=ref_s_mm, on_point=on_point)
                         point_id += 1
         except AxisStateUnknown:
             # Unlike an ordinary motion fault (flagged and continued inside
@@ -641,7 +783,8 @@ class ScanManager:
         maps_dir = _os.path.join(self.config["output"]["base_dir"], "maps")
         self.logger.log_event(f"Maps generated and saved to {maps_dir}")
 
-    def _measure_point(self, point_id, ix, iy, x, y, pass_id=0, is_reference=False, on_point=None):
+    def _measure_point(self, point_id, ix, iy, x, y, pass_id=0, is_reference=False,
+                      s_mm=None, on_point=None):
         limits = self.config["motion"]["soft_limits"]
         self.motion.check_limits(x, y, limits)
 
@@ -670,7 +813,7 @@ class ScanManager:
             feature_values = {name: float("nan") for name in self.oes_cfg["features"]}
 
         record = build_point_record(point_id, x, y, ir_result, oes_result, feature_values,
-                                     pass_id=pass_id)
+                                     pass_id=pass_id, s_mm=s_mm)
         record["is_reference"] = is_reference
         record["motion_error"] = not motion_ok
         # Always present (not conditional) — _append_summary_row derives the
@@ -679,8 +822,15 @@ class ScanManager:
         # it. Empty string on success keeps every row's schema identical.
         record["motion_error_detail"] = motion_error_detail or ""
 
-        # Pass ix/iy so DataLogger can forward them to OESStore.
-        # Reference points have ix=iy=None — DataLogger skips the HDF5 write.
+        # Pass ix/iy so DataLogger can forward them to OESStore. Reference
+        # points have ix=iy=None regardless of mode — DataLogger skips the
+        # HDF5 write for those. Real LINE-mode points also have iy=None
+        # (there's only one spatial index, i, carried in ix -- see
+        # generate_line_points()/run()'s normalization above), which is
+        # why DataLogger.write_point() below can't use "ix is not None and
+        # iy is not None" alone to tell "real line point" apart from
+        # "reference point, skip" -- it asks self.store.mode instead. See
+        # that method's own comment.
         self.logger.write_point(
             record,
             wavelengths=wavelengths,

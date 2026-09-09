@@ -31,6 +31,8 @@ if _REPO_ROOT not in _sys.path:
     _sys.path.insert(0, _REPO_ROOT)
 # ---------------------------------------------------------------------------
 
+import math
+
 DWELL_TIME_DEFAULT_S = 8.0
 DWELL_TIME_MIN_S = 2.0
 DWELL_TIME_MAX_S = 22.0
@@ -142,6 +144,41 @@ def in_radius(x_mm: float, y_mm: float, center_mm, radius_mm: float) -> bool:
     """
     cx, cy = center_mm
     return (x_mm - cx) ** 2 + (y_mm - cy) ** 2 <= radius_mm ** 2
+
+
+def endpoint_from_angle(start_mm, angle_deg: float, length_mm: float):
+    """
+    PR2b (2026-09-08): the operator-facing line-scan input is one
+    endpoint + an angle + a length, not two typed-in endpoints -- this
+    computes the SECOND endpoint from the first, so generate_line_points()
+    below still only ever has to deal with two explicit (x_mm, y_mm)
+    endpoints regardless of which way the operator entered the line.
+
+    Angle convention -- standard math convention in the SCAN-PLANE
+    (x_mm, y_mm) frame: angle_deg=0 points along +x_mm, increasing
+    COUNTERCLOCKWISE toward +y_mm. This is deliberately NOT the same
+    "degrees" as anywhere else in this codebase -- motion_controller.py,
+    real_conexagap_motion.py, and real_mr1530_motion.py all use
+    "degrees" to mean physical mirror/mount tilt, a completely different
+    hardware-frame unit that gets converted to scan-plane mm via
+    deg_per_mm_x/y. There is no risk of these colliding in code (this
+    function never touches motion/), but the SAME WORD meaning two
+    different things in one codebase is exactly the kind of mixup the
+    s_mm-vs-x_mm naming decision elsewhere in PR2b was trying to avoid --
+    called out explicitly here for the same reason.
+
+    Returns (x_mm, y_mm) -- the computed second endpoint. Does NOT
+    validate against a calibrated wafer or motion.soft_limits; both
+    start_mm and this returned endpoint should be checked with
+    in_radius() (wafer shape) before being handed to
+    generate_line_points(), same as gui/line_scan_panel.py does -- this
+    function is pure geometry, no knowledge of calibration state.
+    """
+    x0, y0 = start_mm
+    angle_rad = math.radians(angle_deg)
+    x1 = x0 + length_mm * math.cos(angle_rad)
+    y1 = y0 + length_mm * math.sin(angle_rad)
+    return float(x1), float(y1)
 
 
 def find_out_of_limits(points_xy, limits):
@@ -345,5 +382,130 @@ if __name__ == "__main__":
     # silently return an undersized scan.
     step_inf, n_inf, ok_inf = solve_step_size_for_target_points((0.0, 0.0), 2.0, 10000)
     assert not ok_inf and step_inf == STEP_SIZE_MIN_MM
+
+    # PR2b (2026-09-08): generate_line_points() lives in scan_manager.py,
+    # not here -- same reasoning as solve_step_size_for_target_points()
+    # just above (this file stays the one place with a real regression
+    # self-check; scan_manager.py's own __main__ is the CLI entry point,
+    # not a test harness). Exercised via the same local-import pattern.
+    from scan.scan_manager import generate_line_points
+
+    # A 3-4-5 triangle (start at origin, end at (3,4), length exactly 5)
+    # so the closed-form spacing is exact and easy to hand-check.
+    line_pts = generate_line_points((0.0, 0.0), (3.0, 4.0), 6)
+    assert len(line_pts) == 6
+    # Both endpoints exactly reproduced -- i=0 at start_mm (s_mm=0.0),
+    # i=N-1 at end_mm (s_mm=length).
+    i0, x0, y0, s0 = line_pts[0]
+    assert (i0, x0, y0, s0) == (0, 0.0, 0.0, 0.0)
+    iN, xN, yN, sN = line_pts[-1]
+    assert iN == 5 and abs(xN - 3.0) < 1e-9 and abs(yN - 4.0) < 1e-9 and abs(sN - 5.0) < 1e-9
+
+    # Evenly spaced: s_mm step = length / (n_points - 1) = 5/5 = 1.0mm,
+    # exact closed-form -- no bisection, no rounding drift to guard
+    # against the way PR2a's step solver needed.
+    s_values = [s for _i, _x, _y, s in line_pts]
+    steps = [round(s_values[k + 1] - s_values[k], 9) for k in range(len(s_values) - 1)]
+    assert all(step == 1.0 for step in steps), steps
+
+    # i is a plain 0-based index in generation order, monotonically
+    # increasing -- this is what scan_manager.py's OESStore write path
+    # (and, in line mode, the sole spatial index) relies on.
+    assert [i for i, _x, _y, _s in line_pts] == list(range(6))
+
+    # n_points=1 collapses to a single point at start_mm, s_mm=0.0 --
+    # same "degenerate range -> one point" convention
+    # grid_dims_from_range() already uses.
+    single = generate_line_points((5.0, -5.0), (25.0, 25.0), 1)
+    assert single == [(0, 5.0, -5.0, 0.0)]
+
+    # n_points=0 (or negative) is invalid -- unlike a grid's degenerate
+    # zero-width axis, a line scan can't have zero points and still mean
+    # anything.
+    try:
+        generate_line_points((0.0, 0.0), (1.0, 1.0), 0)
+        raise AssertionError("expected ValueError for n_points=0")
+    except ValueError:
+        pass
+
+    # endpoint_from_angle() + generate_line_points() together, end to
+    # end: an operator-entered start/angle/length must produce the same
+    # line generate_line_points() would from two explicitly-typed
+    # endpoints -- this is the exact composition
+    # gui/line_scan_panel.py's "Solve" button performs.
+    start = (2.0, 3.0)
+    end = endpoint_from_angle(start, 0.0, 8.0)  # due +x, length 8mm
+    composed = generate_line_points(start, end, 5)
+    assert abs(composed[-1][1] - 10.0) < 1e-9 and abs(composed[-1][2] - 3.0) < 1e-9
+    assert abs(composed[-1][3] - 8.0) < 1e-9
+
+    # compute_commanded_points()/preflight_check() mode dispatch: a
+    # line-mode scan_cfg must produce line points (not silently fall
+    # through to generate_grid()), and every one of them still gets
+    # checked against motion.soft_limits -- same defense-in-depth grid
+    # mode already had, now confirmed for line mode too.
+    from scan.scan_manager import compute_commanded_points, preflight_check
+
+    line_scan_cfg = {
+        "grid": {"mode": "line", "line_start_mm": [0.0, 0.0], "line_end_mm": [8.0, 6.0],
+                 "line_n_points": 5},
+    }
+    commanded = compute_commanded_points(line_scan_cfg)
+    assert len(commanded) == 5
+    assert all(label.startswith("line point") for label, _x, _y in commanded)
+    assert abs(commanded[-1][1] - 8.0) < 1e-9 and abs(commanded[-1][2] - 6.0) < 1e-9
+
+    line_config = {
+        "scan": line_scan_cfg,
+        "motion": {"soft_limits": {"x_min_mm": -10, "x_max_mm": 10,
+                                    "y_min_mm": -10, "y_max_mm": 10}},
+    }
+    preflight_check(line_config)  # must not raise -- every point is in bounds
+
+    line_config_too_far = {
+        "scan": {"grid": {"mode": "line", "line_start_mm": [0.0, 0.0],
+                           "line_end_mm": [50.0, 0.0], "line_n_points": 3}},
+        "motion": {"soft_limits": {"x_min_mm": -10, "x_max_mm": 10,
+                                    "y_min_mm": -10, "y_max_mm": 10}},
+    }
+    try:
+        preflight_check(line_config_too_far)
+        raise AssertionError("expected ValueError for a line running past soft_limits")
+    except ValueError:
+        pass
+
+    # PR2b (2026-09-08): endpoint_from_angle() -- 0 deg along +x, 90 deg
+    # along +y (standard math convention, counterclockwise), and a
+    # round-trip through in_radius() to confirm the two stay usable
+    # together the way gui/line_scan_panel.py relies on.
+    ex, ey = endpoint_from_angle((0.0, 0.0), 0.0, 10.0)
+    assert abs(ex - 10.0) < 1e-9 and abs(ey - 0.0) < 1e-9, (ex, ey)
+
+    ex, ey = endpoint_from_angle((0.0, 0.0), 90.0, 10.0)
+    assert abs(ex - 0.0) < 1e-9 and abs(ey - 10.0) < 1e-9, (ex, ey)
+
+    ex, ey = endpoint_from_angle((5.0, -5.0), 180.0, 5.0)
+    assert abs(ex - 0.0) < 1e-9 and abs(ey - -5.0) < 1e-9, (ex, ey)
+
+    # 45 degrees: both axes move by length/sqrt(2).
+    ex, ey = endpoint_from_angle((0.0, 0.0), 45.0, 10.0)
+    expected = 10.0 / math.sqrt(2)
+    assert abs(ex - expected) < 1e-9 and abs(ey - expected) < 1e-9, (ex, ey)
+
+    # A line fully inside a calibrated wafer: both the given start and the
+    # computed end must pass in_radius() -- this is exactly the two-point
+    # check gui/line_scan_panel.py relies on instead of sampling every
+    # point along the line (a circle is convex, so this is sufficient).
+    center, radius = (0.0, 0.0), 25.0
+    start = (0.0, 0.0)
+    end = endpoint_from_angle(start, 30.0, 20.0)
+    assert in_radius(start[0], start[1], center, radius)
+    assert in_radius(end[0], end[1], center, radius)
+
+    # A line that overshoots the wafer: the computed end must fail
+    # in_radius() so the GUI's block/warn path actually has something to
+    # catch.
+    end_far = endpoint_from_angle(start, 30.0, 100.0)
+    assert not in_radius(end_far[0], end_far[1], center, radius)
 
     print("scan_params smoke test OK")

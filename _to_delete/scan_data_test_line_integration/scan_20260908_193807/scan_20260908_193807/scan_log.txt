@@ -1,0 +1,14 @@
+2026-09-08T19:38:08.081778	Scan started (1 pass), output dir: ./scan_data_test_line_integration/scan_20260908_193807/scan_20260908_193807
+2026-09-08T19:38:08.107072	Soft home (scan start): resuming without re-zeroing — calling home() again here would re-zero at the current position instead of restoring the calibration's origin.
+2026-09-08T19:38:10.976951	[PT] point 0 (x=0.0, y=0.0) IR=850.0694058250101 err=False OES_err=False sat=False
+2026-09-08T19:38:13.835444	[PT] point 1 (x=3.0000000000000004, y=4.0) IR=849.985154521952 err=False OES_err=False sat=False
+2026-09-08T19:38:16.685509	[PT] point 2 (x=6.000000000000001, y=8.0) IR=850.0458973772762 err=False OES_err=False sat=False
+2026-09-08T19:38:16.719411	Revisiting reference point (0, 0) after point 3
+2026-09-08T19:38:19.487131	[REF] point 3 (x=0, y=0) IR=849.9616649091965 err=False OES_err=False sat=False
+2026-09-08T19:38:22.385142	[PT] point 4 (x=9.0, y=12.0) IR=850.001124918473 err=False OES_err=False sat=False
+2026-09-08T19:38:25.192466	[PT] point 5 (x=12.000000000000002, y=16.0) IR=849.9854824041549 err=False OES_err=False sat=False
+2026-09-08T19:38:25.217704	Revisiting reference point (0, 0) after point 6
+2026-09-08T19:38:27.959847	[REF] point 6 (x=0, y=0) IR=850.0526421534387 err=False OES_err=False sat=False
+2026-09-08T19:38:30.868021	[PT] point 7 (x=15.000000000000002, y=20.0) IR=850.029005472039 err=False OES_err=False sat=False
+2026-09-08T19:38:30.898708	Scan complete (1 pass, 8 total points written)
+2026-09-08T19:38:34.617815	Maps generated and saved to ./scan_data_test_line_integration/scan_20260908_193807/scan_20260908_193807/maps
