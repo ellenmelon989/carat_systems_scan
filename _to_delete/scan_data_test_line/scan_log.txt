@@ -1,1 +1,0 @@
-2026-09-08T19:20:28.836235	WARNING: ./scan_data_test_line/scan_summary.csv already exists — new rows will be APPENDED to it (point_id restarts from 0), not written to a fresh file. If this is a different scan than whatever wrote the existing rows, point a different output.base_dir at it first or move/rename the existing scan_data directory.

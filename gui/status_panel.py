@@ -66,7 +66,9 @@ class StatusPanel(ttk.Frame):
         self.pos_var.set(f"Position: {x_mm:.2f}, {y_mm:.2f} mm")
 
         ir_val = record.get("ir_temp_c")
-        if ir_val is None or (isinstance(ir_val, float) and math.isnan(ir_val)):
+        if record.get("ir_skipped"):
+            ir_str = "disabled"
+        elif ir_val is None or (isinstance(ir_val, float) and math.isnan(ir_val)):
             ir_str = "NaN (read error)"
         else:
             ir_str = f"{ir_val:.1f} C"

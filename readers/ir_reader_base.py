@@ -6,6 +6,7 @@ interface so scan_manager.py doesn't care which one is plugged in.
 """
 
 from __future__ import annotations
+import statistics
 import time
 from dataclasses import dataclass
 from typing import Optional, Tuple
@@ -31,10 +32,24 @@ class IRReader:
 
     def read_averaged(self, averaging_time_s: float,
                       poll_interval_s: float = 0.1,
-                      min_reads: int = 3) -> Tuple[float, IRReading]:
+                      min_reads: int = 3) -> Tuple[float, float, IRReading]:
         """
-        Poll read() for averaging_time_s, return (mean_value_c, last_reading).
-        Skips stale/errored readings. Returns NaN if no valid reads collected.
+        Poll read() for averaging_time_s, return (mean_value_c, std_value_c,
+        last_reading). Skips stale/errored readings. Both mean and std are
+        NaN if no valid reads collected.
+
+        std_value_c (PR-Stage2, 2026-09-09): population standard deviation
+        of the same valid_values this method was already collecting to
+        compute the mean -- previously that list was discarded right after
+        averaging, so signal-quality information that was already being
+        measured (how noisy was this point's dwell window) never reached
+        the caller. statistics.pstdev is well-defined at n=1 (returns 0.0)
+        unlike statistics.stdev (n>=2 required) -- this is a description of
+        within-dwell variability, not an inferential sample statistic, so
+        pstdev is the right one. Not multiplied/scaled by anything; callers
+        that want a different quality proxy (e.g. valid-vs-attempted read
+        count) can add one later without touching this return shape again,
+        since std alone was the smaller, cheaper addition to make first.
         """
         valid_values = []
         last_reading = None
@@ -49,8 +64,13 @@ class IRReader:
                 break
             time.sleep(poll_interval_s)
 
-        mean_val = float(sum(valid_values) / len(valid_values)) if valid_values else float("nan")
-        return mean_val, last_reading
+        if valid_values:
+            mean_val = float(sum(valid_values) / len(valid_values))
+            std_val = float(statistics.pstdev(valid_values))
+        else:
+            mean_val = float("nan")
+            std_val = float("nan")
+        return mean_val, std_val, last_reading
 
     def close(self):
         pass

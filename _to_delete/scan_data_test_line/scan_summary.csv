@@ -1,5 +1,0 @@
-point_id,pass_id,x_mm,y_mm,timestamp,ir_temp_c,ir_emissivity,ir_dilution,ir_error,oes_saturated,oes_error,feature_CH,s_mm
-0,0,6.0,8.0,2026-09-08T19:18:54.479411,900.0,0.8,nan,False,False,False,100.0,10.0
-1,0,0.0,0.0,2026-09-08T19:18:54.967449,899.0,0.8,nan,False,False,False,99.0,True
-0,0,6.0,8.0,2026-09-08T19:20:28.873169,900.0,0.8,nan,False,False,False,100.0,10.0,False
-1,0,0.0,0.0,2026-09-08T19:20:29.411923,899.0,0.8,nan,False,False,False,99.0,nan,True

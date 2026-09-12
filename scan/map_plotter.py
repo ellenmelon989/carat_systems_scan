@@ -152,6 +152,19 @@ def _generate_line_maps(df, maps_dir):
     plot_line(s_mm, values, "Substrate Temperature vs. Position",
               os.path.join(maps_dir, "temperature_line.png"), ylabel="Temperature (C)")
 
+    # PR-Stage2 (2026-09-09): std dev of the dwell window's IR reads --
+    # same "skip loud if missing/all-NaN" convention as dilution below,
+    # since a whole scan with IR disabled (ir.enabled: false) or failing
+    # leaves this column all-NaN too.
+    if "ir_temp_std_c" in df.columns and df["ir_temp_std_c"].notna().any():
+        s_mm, values = line_values_from_points(df, "ir_temp_std_c")
+        plot_line(s_mm, values, "Substrate Temperature Std Dev vs. Position",
+                  os.path.join(maps_dir, "temperature_std_line.png"), ylabel="Std Dev (C)")
+    else:
+        print("NOTE: skipping temperature std-dev line plot — 'ir_temp_std_c' is "
+              "missing or all-NaN (older scan run before 2026-09-09, or IR was "
+              "disabled/failed for this whole scan).")
+
     if "ir_emissivity" in df.columns:
         s_mm, values = line_values_from_points(df, "ir_emissivity")
         plot_line(s_mm, values, "Pyrometer Emissivity vs. Position",
@@ -249,6 +262,18 @@ def generate_all_maps(config):
     plot_map(xs, ys, grid, "Substrate Temperature", os.path.join(maps_dir, "temperature_map.png"),
              cmap="inferno", label="Temperature (C)")
 
+    # IR temperature std-dev map — PR-Stage2 (2026-09-09), same
+    # "skip loud if missing/all-NaN" convention as dilution below.
+    if "ir_temp_std_c" in df.columns and df["ir_temp_std_c"].notna().any():
+        xs, ys, grid = grid_from_points(df, "ir_temp_std_c")
+        plot_map(xs, ys, grid, "Substrate Temperature Std Dev",
+                 os.path.join(maps_dir, "temperature_std_map.png"),
+                 cmap="viridis", label="Std Dev (C)")
+    else:
+        print("NOTE: skipping temperature std-dev map — 'ir_temp_std_c' is missing "
+              "or all-NaN (older scan run before 2026-09-09, or IR was "
+              "disabled/failed for this whole scan).")
+
     # IR emissivity (signal strength) map
     if "ir_emissivity" in df.columns:
         xs, ys, grid = grid_from_points(df, "ir_emissivity")
@@ -342,6 +367,8 @@ def _self_test():
             "ir_temp_c": 900.0 + s_mm,
             "ir_emissivity": [0.85] * n,
             "ir_dilution": [float("nan")] * n,  # unset tag name -- must skip loud, not crash
+            "ir_temp_std_c": 0.3 + 0.02 * s_mm,  # real values -- std map/line should generate
+
             "feature_C2_Swan": np.linspace(100.0, 200.0, n),
             "feature_H_alpha": np.linspace(50.0, 60.0, n),
         })
@@ -356,8 +383,9 @@ def _self_test():
 
         maps_dir = os.path.join(tmp_dir, "maps")
         expected = [
-            "temperature_line.png", "emissivity_line.png", "C2_Swan_line.png",
-            "H_alpha_line.png", "total_intensity_line.png", "ratio_C2_Halpha_line.png",
+            "temperature_line.png", "temperature_std_line.png", "emissivity_line.png",
+            "C2_Swan_line.png", "H_alpha_line.png", "total_intensity_line.png",
+            "ratio_C2_Halpha_line.png",
         ]
         for filename in expected:
             path = os.path.join(maps_dir, filename)

@@ -388,6 +388,20 @@ class ScanManager:
         self.oes_cfg = config["oes"]
         self.error_cfg = config["error_policy"]
 
+        # PR-Stage2 (2026-09-09): per-run acquisition on/off toggles.
+        # Default true = today's behavior, unchanged, for any config that
+        # predates these keys. Disabling a channel skips the actual READ
+        # in _read_ir_with_retry()/_read_oes_with_retry() below (the real
+        # time cost -- dwell-window polling) to save time; it does NOT
+        # skip constructing that channel's reader below, so the hardware
+        # still needs to be connectable at scan start either way. Making
+        # a disabled channel also skip reader construction (so a scan
+        # could run with that instrument physically absent) is a
+        # different, larger change -- deliberately out of scope here,
+        # see the project doc's Stage 2 writeup.
+        self.ir_enabled = bool(config.get("ir", {}).get("enabled", True))
+        self.oes_enabled = bool(config.get("oes", {}).get("enabled", True))
+
         # dwell_time_s is the single operator-facing per-point IR averaging
         # duration (replaces the old ir.averaging_time_s config key — see
         # scan_params.py for the valid range).
@@ -800,8 +814,9 @@ class ScanManager:
             # point and move on rather than measuring blind or aborting
             # the whole scan (see _move_with_retry).
             ir_result = {"value": float("nan"), "emissivity": float("nan"),
-                         "dilution": None, "error": True}
-            oes_result = {"saturated": False, "error": True}
+                         "dilution": None, "std": float("nan"),
+                         "error": True, "skipped": False}
+            oes_result = {"saturated": False, "error": True, "skipped": False}
             wavelengths, intensities = None, None
 
         if intensities is not None:
@@ -942,34 +957,55 @@ class ScanManager:
         every poll and then thrown away — never reached build_point_record,
         the CSV, or the HDF5 store. Fixed 2026-07-21.
         """
+        if not self.ir_enabled:
+            # PR-Stage2: operator disabled IR for this run -- skip the
+            # dwell-window poll entirely (the real time cost) rather than
+            # reading and discarding. "skipped": True distinguishes this
+            # from a real read failure downstream (status display, CSV/
+            # HDF5 ir_skipped column) -- both still report NaN values, but
+            # only a failure should look like a fault.
+            return {"value": float("nan"), "emissivity": float("nan"), "dilution": None,
+                    "std": float("nan"), "error": False, "skipped": True}
+
         max_retries = self.error_cfg["max_retries"]
         for attempt in range(max_retries + 1):
             try:
-                value, reading = self.ir_reader.read_averaged(self.dwell_time_s)
+                value, std, reading = self.ir_reader.read_averaged(self.dwell_time_s)
                 return {
                     "value": value,
                     "emissivity": reading.emissivity if reading is not None else float("nan"),
                     "dilution": reading.dilution if reading is not None else None,
+                    "std": std,
                     "error": False,
+                    "skipped": False,
                 }
             except Exception as e:
                 self.logger.log_event(f"IR read failed (attempt {attempt + 1}): {e}")
 
-        return {"value": float("nan"), "emissivity": float("nan"), "dilution": None, "error": True}
+        return {"value": float("nan"), "emissivity": float("nan"), "dilution": None,
+                "std": float("nan"), "error": True, "skipped": False}
 
     def _read_oes_with_retry(self):
+        if not self.oes_enabled:
+            # PR-Stage2: operator disabled OES for this run -- skip the
+            # spectrometer read. feature_values downstream in
+            # _measure_point() already falls back to all-NaN whenever
+            # intensities is None (the existing "read failed" path), so
+            # no separate handling is needed there for the skipped case.
+            return {"saturated": False, "error": False, "skipped": True}, None, None
+
         max_retries = self.error_cfg["max_retries"]
         for attempt in range(max_retries + 1):
             try:
                 reading = self.spectrometer.read()
                 if reading.error:
                     raise IOError(reading.error)
-                return ({"saturated": reading.saturated, "error": False},
+                return ({"saturated": reading.saturated, "error": False, "skipped": False},
                         reading.wavelengths, reading.intensities)
             except Exception as e:
                 self.logger.log_event(f"OES read failed (attempt {attempt + 1}): {e}")
 
-        return {"saturated": False, "error": True}, None, None
+        return {"saturated": False, "error": True, "skipped": False}, None, None
 
 
 if __name__ == "__main__":

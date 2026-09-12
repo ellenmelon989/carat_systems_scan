@@ -146,6 +146,15 @@ class LineScanPanel(ttk.Frame):
         self.target_points_var = tk.StringVar(value="")
         self.solve_result_var = tk.StringVar(value="")
 
+        # PR-Stage2 (2026-09-09): mirrors ControlPanel's ir_enabled_var/
+        # oes_enabled_var -- see config.yaml's ir.enabled/oes.enabled
+        # comments. Readers are still constructed either way; this only
+        # skips the actual dwell-window read.
+        self.ir_enabled_var = tk.BooleanVar(
+            value=bool(self.base_config.get("ir", {}).get("enabled", True)))
+        self.oes_enabled_var = tk.BooleanVar(
+            value=bool(self.base_config.get("oes", {}).get("enabled", True)))
+
         frame = ttk.LabelFrame(self.params_frame, text="Line scan parameters", padding=8)
         frame.grid(row=0, column=0, sticky="n")
 
@@ -183,6 +192,14 @@ class LineScanPanel(ttk.Frame):
 
         ttk.Label(frame, text=f"Passes  [{PASSES_MIN}-{PASSES_MAX}]").grid(row=row, column=0, sticky="w")
         ttk.Entry(frame, textvariable=self.passes_var, width=10).grid(row=row, column=1, sticky="w")
+        row += 1
+
+        ttk.Checkbutton(
+            frame, text="Enable IR (pyrometer)", variable=self.ir_enabled_var,
+        ).grid(row=row, column=0, sticky="w")
+        ttk.Checkbutton(
+            frame, text="Enable OES (spectrometer)", variable=self.oes_enabled_var,
+        ).grid(row=row, column=1, sticky="w")
         row += 1
 
         ttk.Label(frame, text="Output dir").grid(row=row, column=0, sticky="w")
@@ -266,6 +283,8 @@ class LineScanPanel(ttk.Frame):
         self.dwell_var.set(str(scan_cfg.get("dwell_time_s", DWELL_TIME_DEFAULT_S)))
         self.passes_var.set(str(scan_cfg.get("passes", PASSES_DEFAULT)))
         self.outdir_var.set(self.base_config["output"].get("base_dir", "./scan_data"))
+        self.ir_enabled_var.set(bool(self.base_config.get("ir", {}).get("enabled", True)))
+        self.oes_enabled_var.set(bool(self.base_config.get("oes", {}).get("enabled", True)))
 
         center_mm, _ = self._calibrated_center_and_radius()
         if center_mm is not None:
@@ -392,6 +411,8 @@ class LineScanPanel(ttk.Frame):
         effective_config["scan"]["dwell_time_s"] = dwell
         effective_config["scan"]["passes"] = passes
         effective_config["output"]["base_dir"] = self.outdir_var.get()
+        effective_config["ir"]["enabled"] = self.ir_enabled_var.get()
+        effective_config["oes"]["enabled"] = self.oes_enabled_var.get()
 
         # Additive line-mode keys only -- the pre-existing grid-mode keys
         # (x_range_mm/wafer_center_mm/wafer_radius_mm/step_size_mm) are
@@ -513,7 +534,9 @@ class LineScanPanel(ttk.Frame):
         self.pos_var.set(f"Position: x={x_mm:.2f}, y={y_mm:.2f} mm  (s={s_str} mm)")
 
         ir_val = record.get("ir_temp_c")
-        if ir_val is None or (isinstance(ir_val, float) and math.isnan(ir_val)):
+        if record.get("ir_skipped"):
+            ir_str = "disabled"
+        elif ir_val is None or (isinstance(ir_val, float) and math.isnan(ir_val)):
             ir_str = "NaN (read error)"
         else:
             ir_str = f"{ir_val:.1f} C"

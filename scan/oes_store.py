@@ -20,6 +20,13 @@ module was written)
   /ir_dilution    (nx, ny, npass)    float32, NaN until written; stays all-NaN
                                        until ir.pac.dilution_tag_name is set
                                        (see tools/list_pac_strategy_vars.py)
+  /ir_temp_std_c  (nx, ny, npass)    float32, NaN until written; population
+                                       std dev of the dwell window's valid IR
+                                       reads (see IRReader.read_averaged()) --
+                                       added PR-Stage2, 2026-09-09. Stays
+                                       all-NaN for a point where IR was
+                                       disabled (ir.enabled: false) or the
+                                       read failed, same as ir_temp_c itself.
   /timestamp      (nx, ny, npass)    float64, Unix epoch seconds
   /saturated      (nx, ny, npass)    bool
   /ir_error       (nx, ny, npass)    bool
@@ -45,8 +52,9 @@ spatial axis:
                                        via .sel(), for reference/plotting.
   /line_y_mm      (n,)               mm, REAL physical y — same as above.
   /wavelength_nm, /intensity, /ir_temp_c, /ir_emissivity, /ir_dilution,
-  /timestamp, /saturated, /ir_error, /oes_error — same meaning as grid
-    mode, but shaped (n, npass, ...) instead of (nx, ny, npass, ...).
+  /ir_temp_std_c, /timestamp, /saturated, /ir_error, /oes_error — same
+    meaning as grid mode, but shaped (n, npass, ...) instead of
+    (nx, ny, npass, ...).
 
   File attrs (h5py root-group attrs, not datasets): start_mm, end_mm —
   the two endpoints generate_line_points() was called with, recorded
@@ -294,6 +302,8 @@ class OESStore:
                              dtype="float32", fillvalue=np.nan)
             f.create_dataset("ir_dilution", shape=shape,
                              dtype="float32", fillvalue=np.nan)
+            f.create_dataset("ir_temp_std_c", shape=shape,
+                             dtype="float32", fillvalue=np.nan)
             f.create_dataset("timestamp", shape=shape,
                              dtype="float64", fillvalue=np.nan)
             f.create_dataset("saturated", shape=shape,
@@ -319,6 +329,7 @@ class OESStore:
         ir_temp_c: Optional[float] = None,
         ir_emissivity: Optional[float] = None,
         ir_dilution: Optional[float] = None,
+        ir_temp_std_c: Optional[float] = None,
         timestamp: Optional[float] = None,
         saturated: bool = False,
         ir_error: bool = False,
@@ -360,6 +371,10 @@ class OESStore:
         ir_dilution : float, optional
             Last-poll pyro signal dilution. Stays NaN for every point until
             ir.pac.dilution_tag_name is confirmed and set in config.yaml.
+        ir_temp_std_c : float, optional
+            Population std dev of the dwell window's valid IR reads (see
+            IRReader.read_averaged()). NaN if IR was disabled or the read
+            failed for this point.
         timestamp : float, optional
             Unix epoch seconds. Defaults to now.
         saturated, ir_error, oes_error : bool
@@ -390,6 +405,8 @@ class OESStore:
                 f["ir_emissivity"][index] = float(ir_emissivity)
             if ir_dilution is not None:
                 f["ir_dilution"][index] = float(ir_dilution)
+            if ir_temp_std_c is not None:
+                f["ir_temp_std_c"][index] = float(ir_temp_std_c)
             f["timestamp"][index] = timestamp if timestamp is not None else time.time()
             f["saturated"][index] = saturated
             f["ir_error"][index] = ir_error
@@ -411,8 +428,8 @@ class OESStore:
         -------
         xr.Dataset with data variables (dims (x_mm, y_mm, pass_id, ...)
         for a grid-mode file, (s_mm, pass_id, ...) for a line-mode one):
-            intensity, ir_temp_c, ir_emissivity, ir_dilution, timestamp,
-            saturated, ir_error, oes_error
+            intensity, ir_temp_c, ir_emissivity, ir_dilution, ir_temp_std_c,
+            timestamp, saturated, ir_error, oes_error
 
         Line-mode files also carry line_x_mm/line_y_mm (real physical
         coordinates, indexed by s_mm — NOT usable as .sel() axes
@@ -446,6 +463,7 @@ class OESStore:
                     "ir_temp_c": (dims, f["ir_temp_c"][:]),
                     "ir_emissivity": (dims, _optional("ir_emissivity")),
                     "ir_dilution": (dims, _optional("ir_dilution")),
+                    "ir_temp_std_c": (dims, _optional("ir_temp_std_c")),
                     "timestamp": (dims, f["timestamp"][:]),
                     "saturated": (dims, f["saturated"][:]),
                     "ir_error": (dims, f["ir_error"][:]),
@@ -470,6 +488,7 @@ class OESStore:
                     "ir_temp_c": (dims, f["ir_temp_c"][:]),
                     "ir_emissivity": (dims, _optional("ir_emissivity")),
                     "ir_dilution": (dims, _optional("ir_dilution")),
+                    "ir_temp_std_c": (dims, _optional("ir_temp_std_c")),
                     "timestamp": (dims, f["timestamp"][:]),
                     "saturated": (dims, f["saturated"][:]),
                     "ir_error": (dims, f["ir_error"][:]),
@@ -524,6 +543,7 @@ if __name__ == "__main__":
                         ir_temp_c=900.0 + ix * 5 + iy + pass_id * 10,
                         ir_emissivity=0.85 + 0.01 * ix,
                         ir_dilution=1.0 + 0.02 * iy,
+                        ir_temp_std_c=0.3 + 0.01 * iy,
                         saturated=False,
                     )
 
@@ -534,12 +554,14 @@ if __name__ == "__main__":
         assert not np.isnan(ds.ir_temp_c.values).any(), "every (ix, iy, pass) should be written"
         assert not np.isnan(ds.ir_emissivity.values).any(), "every (ix, iy, pass) should be written"
         assert not np.isnan(ds.ir_dilution.values).any(), "every (ix, iy, pass) should be written"
+        assert not np.isnan(ds.ir_temp_std_c.values).any(), "every (ix, iy, pass) should be written"
         # Same XY point, later pass should be +10 (per the fake drift above)
         delta = float(ds.ir_temp_c.isel(pass_id=1).values[2, 2] - ds.ir_temp_c.isel(pass_id=0).values[2, 2])
         assert abs(delta - 10.0) < 1e-3, f"expected pass-to-pass delta of 10.0, got {delta}"
         print(f"IR range: {float(ds.ir_temp_c.min()):.1f} – {float(ds.ir_temp_c.max()):.1f} °C")
         print(f"Emissivity range: {float(ds.ir_emissivity.min()):.3f} – {float(ds.ir_emissivity.max()):.3f}")
         print(f"Dilution range: {float(ds.ir_dilution.min()):.3f} – {float(ds.ir_dilution.max()):.3f}")
+        print(f"Temp std range: {float(ds.ir_temp_std_c.min()):.3f} – {float(ds.ir_temp_std_c.max()):.3f}")
         c2_map = ds.intensity.sel(wavelength_nm=516.0, method="nearest").isel(pass_id=-1)
         print(f"C2 Swan (516 nm) map mean (latest pass): {float(c2_map.mean()):.1f}")
         print("OK (grid mode)")
@@ -576,6 +598,7 @@ if __name__ == "__main__":
                 wavelengths=wl, intensities=spec,
                 ir_temp_c=900.0 + i,
                 ir_emissivity=0.8,
+                ir_temp_std_c=0.2 + 0.02 * i,
                 saturated=False,
             )
 
@@ -586,6 +609,7 @@ if __name__ == "__main__":
         assert "x_mm" not in ds.coords and "y_mm" not in ds.coords, (
             "line-mode dataset must not carry x_mm/y_mm as coordinate axes")
         assert not np.isnan(ds.ir_temp_c.values).any()
+        assert not np.isnan(ds.ir_temp_std_c.values).any()
         assert float(ds.s_mm.max()) == 50.0
         assert abs(float(ds.line_x_mm.isel(s_mm=-1)) - 30.0) < 1e-3
         assert abs(float(ds.line_y_mm.isel(s_mm=-1)) - 40.0) < 1e-3
@@ -619,5 +643,16 @@ if __name__ == "__main__":
         except ValueError:
             pass
         print("OK (grid mode requires iy)")
+
+        # Backward compat: delete the dataset to simulate a .h5 file
+        # written before ir_temp_std_c existed, confirm .load() still
+        # works (falls back to all-NaN via _optional(), not a KeyError).
+        import h5py as _h5py
+        with _h5py.File(path2, "a") as f:
+            del f["ir_temp_std_c"]
+        ds_old = OESStore.load(path2)
+        assert np.isnan(ds_old.ir_temp_std_c.values).all(), (
+            "old file without ir_temp_std_c should load as all-NaN, not crash")
+        print("OK (old .h5 file without ir_temp_std_c loads as all-NaN)")
     finally:
         os.unlink(path2)

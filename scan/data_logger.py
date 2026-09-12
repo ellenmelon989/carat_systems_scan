@@ -195,8 +195,8 @@ class DataLogger:
 
         point_record: dict with keys such as
             point_id, pass_id, x_mm, y_mm, ir_temp_c, ir_emissivity,
-            ir_dilution, ir_error, oes_error, oes_saturated,
-            feature_<name> values, timestamp
+            ir_dilution, ir_temp_std_c, ir_error, ir_skipped, oes_error,
+            oes_skipped, oes_saturated, feature_<name> values, timestamp
         ix, iy : int, optional
             Grid indices required when an OESStore is attached.
             Ignored (and not needed) for pure-CSV operation.
@@ -229,6 +229,7 @@ class DataLogger:
                 ir_temp_c=point_record.get("ir_temp_c"),
                 ir_emissivity=point_record.get("ir_emissivity"),
                 ir_dilution=point_record.get("ir_dilution"),
+                ir_temp_std_c=point_record.get("ir_temp_std_c"),
                 timestamp=time.time(),
                 saturated=bool(point_record.get("oes_saturated", False)),
                 ir_error=bool(point_record.get("ir_error", False)),
@@ -295,9 +296,21 @@ def build_point_record(point_id, x_mm, y_mm, ir_result, oes_result, feature_valu
         # NaN in that case so the CSV column stays numeric/consistent
         # rather than mixing None and floats.
         "ir_dilution": ir_result.get("dilution") if ir_result.get("dilution") is not None else float("nan"),
+        # PR-Stage2 (2026-09-09): population std dev of the dwell-window's
+        # valid IR reads -- see IRReader.read_averaged()'s docstring. NaN
+        # (not omitted) when unavailable, same convention as the other IR
+        # fields above -- always present so _append_summary_row's per-row
+        # fieldnames() never drifts between rows (see the s_mm fix, PR2b).
+        "ir_temp_std_c": ir_result.get("std", float("nan")),
         "ir_error": ir_result.get("error", False),
+        # True only when the operator disabled this channel for the run
+        # (ir.enabled/oes.enabled: false) -- distinct from ir_error/
+        # oes_error, which mean the channel WAS attempted and failed.
+        # Always present, same reasoning as ir_temp_std_c above.
+        "ir_skipped": ir_result.get("skipped", False),
         "oes_saturated": oes_result.get("saturated", False),
         "oes_error": oes_result.get("error", False),
+        "oes_skipped": oes_result.get("skipped", False),
     }
 
     for name, value in feature_values.items():

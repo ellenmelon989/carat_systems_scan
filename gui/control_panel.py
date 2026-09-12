@@ -62,6 +62,15 @@ class ControlPanel(ttk.Frame):
         self.target_points_var = tk.StringVar(value="")
         self.solve_result_var = tk.StringVar(value="")
 
+        # PR-Stage2 (2026-09-09): per-run override to skip the IR and/or
+        # OES read entirely (saves dwell time) -- see config.yaml's
+        # ir.enabled/oes.enabled comments. Readers are still constructed
+        # either way; this only skips the actual dwell-window read.
+        self.ir_enabled_var = tk.BooleanVar(
+            value=bool(config.get("ir", {}).get("enabled", True)))
+        self.oes_enabled_var = tk.BooleanVar(
+            value=bool(config.get("oes", {}).get("enabled", True)))
+
         row = 0
         ttk.Label(self, text=f"Dwell time (s)  [{DWELL_TIME_MIN_S}-{DWELL_TIME_MAX_S}]").grid(
             row=row, column=0, sticky="w")
@@ -113,6 +122,14 @@ class ControlPanel(ttk.Frame):
         ttk.Combobox(
             self, textvariable=self.order_var, values=["raster", "serpentine"],
             state="readonly", width=10,
+        ).grid(row=row, column=1, sticky="w")
+        row += 1
+
+        ttk.Checkbutton(
+            self, text="Enable IR (pyrometer)", variable=self.ir_enabled_var,
+        ).grid(row=row, column=0, sticky="w")
+        ttk.Checkbutton(
+            self, text="Enable OES (spectrometer)", variable=self.oes_enabled_var,
         ).grid(row=row, column=1, sticky="w")
         row += 1
 
@@ -225,6 +242,8 @@ class ControlPanel(ttk.Frame):
         effective_config["scan"]["passes"] = passes
         effective_config["scan"]["scan_order"] = self.order_var.get()
         effective_config["output"]["base_dir"] = self.outdir_var.get()
+        effective_config["ir"]["enabled"] = self.ir_enabled_var.get()
+        effective_config["oes"]["enabled"] = self.oes_enabled_var.get()
 
         # PR2a: only override the grid range/mask when a diameter was
         # actually typed in AND it's strictly smaller than the full
@@ -288,6 +307,8 @@ class ControlPanel(ttk.Frame):
         self.passes_var.set(str(scan_cfg.get("passes", PASSES_DEFAULT)))
         self.order_var.set(scan_cfg.get("scan_order", "raster"))
         self.outdir_var.set(self.base_config["output"].get("base_dir", "./scan_data"))
+        self.ir_enabled_var.set(bool(self.base_config.get("ir", {}).get("enabled", True)))
+        self.oes_enabled_var.set(bool(self.base_config.get("oes", {}).get("enabled", True)))
 
         # PR2a: a fresh calibration hand-off changes what the full wafer
         # diameter even IS -- clear any diameter/point-count typed against
