@@ -20,11 +20,50 @@ for testing against real hardware once it arrives (see
 docs/mr1530_migration_plan.md section 5).
 """
 
+import bisect
 import struct
 from unittest.mock import patch
 
 import motion.real_mr1530_motion as mr1530_module
 from motion.real_mr1530_motion import MR1530Controller
+
+
+# Bit 4 ("mirror not stable") vs. time since the move command was acked,
+# measured 2026-09-25 on real hardware (MR-E-3 on COM7, ~0.3 ms per STATUS
+# round trip, X=0.3 step ~= 10 deg mechanical). Each entry is
+# (start_time_s, bit4_set): bit 4 holds that value from start_time_s until
+# the next entry. The last entry holds forever.
+MEASURED_SETTLE_TRACE_2026_09_25 = (
+    (0.0000, True),
+    (0.0147, False),
+    (0.0149, True),
+    (0.0177, False),
+    (0.0185, True),
+    (0.0188, False),
+    (0.0191, True),
+    (0.0199, False),  # stays stable
+)
+
+
+class VirtualClock:
+    """Deterministic stand-in for the `time` module inside
+    real_mr1530_motion (patch mr1530_module.time with an instance).
+    monotonic() returns virtual seconds; sleep() advances them instantly.
+    FakeMR1530Serial advances it by status_query_s per STATUS round trip
+    so polling loops (e.g. the settle hold window) always see time move."""
+
+    def __init__(self, start: float = 1000.0):
+        self.now = start
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float):
+        if seconds > 0:
+            self.now += seconds
+
+    def advance(self, seconds: float):
+        self.now += seconds
 
 
 class FakeMR1530Serial:
@@ -54,6 +93,16 @@ class FakeMR1530Serial:
         the "reported stable then unstable again on confirm" branch.
         Falls back to `never_settles` once the sequence is exhausted.
       - never_settles: STATUS always reports "not stable" (bit 4 set).
+      - bit4_trace + clock: time-scripted chatter mode. bit4_trace is a
+        sequence of (start_time_s, bit4_set) transitions (see
+        MEASURED_SETTLE_TRACE_2026_09_25) evaluated against clock (a
+        VirtualClock) as elapsed time since the last XY= move command.
+        Each STATUS read samples bit 4 at the current virtual time, then
+        advances the clock by status_query_s (default 0.3 ms, the
+        measured round trip). Takes precedence over
+        status_bit4_sequence / never_settles when set.
+      STATUS replies use the real firmware's formats (2026-09-25):
+      "0000000000" when no bits are set, "0x%08X" otherwise.
       - current_limit / avg_current_limit / temp_limit: force the
         corresponding STATUS fault bits, which _wait_move() escalates
         to MotionFault immediately (no timeout wait needed).
@@ -74,6 +123,9 @@ class FakeMR1530Serial:
         fault_register_readable=True,
         initial_norm_x=0.0,
         initial_norm_y=0.0,
+        bit4_trace=None,
+        clock=None,
+        status_query_s=0.0003,
     ):
         self.timeout = 0.05
         self.write_timeout = 0.05
@@ -89,6 +141,14 @@ class FakeMR1530Serial:
         self.fault_register_value = fault_register_value
         self.fault_register_readable = fault_register_readable
         self._status_call_count = 0
+
+        if bit4_trace is not None and clock is None:
+            raise ValueError("bit4_trace requires a clock (VirtualClock)")
+        self.bit4_trace = tuple(bit4_trace) if bit4_trace is not None else None
+        self._trace_times = [t for t, _ in self.bit4_trace] if self.bit4_trace else []
+        self.clock = clock
+        self.status_query_s = status_query_s
+        self.last_move_time = clock.monotonic() if clock is not None else None
 
         self.norm_x = initial_norm_x
         self.norm_y = initial_norm_y
@@ -139,6 +199,13 @@ class FakeMR1530Serial:
         self._out += data
 
     def _status_bit4_is_set(self) -> bool:
+        if self.bit4_trace is not None:
+            elapsed = self.clock.monotonic() - self.last_move_time
+            idx = bisect.bisect_right(self._trace_times, elapsed) - 1
+            value = self.bit4_trace[max(idx, 0)][1]
+            self._status_call_count += 1
+            self.clock.advance(self.status_query_s)
+            return bool(value)
         if self._status_call_count < len(self.status_bit4_sequence):
             value = self.status_bit4_sequence[self._status_call_count]
         else:
@@ -164,9 +231,14 @@ class FakeMR1530Serial:
                 bits |= 1 << mr1530_module._STATUS_BIT_MIRROR_TEMP_LIMIT
             if self._status_bit4_is_set():
                 bits |= 1 << mr1530_module._STATUS_BIT_MIRROR_NOT_STABLE
-            self._queue(f"{bits:08X}\r\n".encode("ascii"))
+            # Real firmware formats (measured 2026-09-25): all-clear is
+            # ten bare zeros; anything else is 0x-prefixed 8-digit hex.
+            text = "0000000000" if bits == 0 else f"0x{bits:08X}"
+            self._queue(f"{text}\r\n".encode("ascii"))
         elif cmd.startswith("XY="):
             self.move_commands.append(cmd)
+            if self.clock is not None:
+                self.last_move_time = self.clock.monotonic()
             body = cmd[len("XY="):]
             x_str, y_str = body.split(";")
             target_x, target_y = float(x_str), float(y_str)

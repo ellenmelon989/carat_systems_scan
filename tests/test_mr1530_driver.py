@@ -11,9 +11,17 @@ if _REPO_ROOT not in _sys.path:
     _sys.path.insert(0, _REPO_ROOT)
 # ---------------------------------------------------------------------------
 
+from unittest.mock import patch
+
+import motion.real_mr1530_motion as mr1530_module
 from motion.motion_controller import MotionFault, AxisStateUnknown
 
-from tests.fake_mr1530_serial import FakeMR1530Serial, make_controller
+from tests.fake_mr1530_serial import (
+    MEASURED_SETTLE_TRACE_2026_09_25,
+    FakeMR1530Serial,
+    VirtualClock,
+    make_controller,
+)
 
 
 class ConstructorValidationTests(unittest.TestCase):
@@ -235,6 +243,82 @@ class StatusFaultBitTests(unittest.TestCase):
         mc = make_controller(fake, move_timeout_s=1.0)
         mc.wait_for_settle(settle_time_s=0.0)  # must return, not raise
         self.assertGreaterEqual(fake._status_call_count, 6)
+
+
+class SettleChatterTraceTests(unittest.TestCase):
+    """v5 (2026-09-25) regression: replay the bit-4 chatter measured on
+    real hardware and check the settle hold window waits it out.
+
+    The trace goes stable at 14.7 ms but re-asserts "not stable" three
+    more times before staying stable from 19.9 ms. A two-point-sample
+    confirm whose samples both land in stable gaps (e.g. 17.8 ms and
+    18.8 ms) would report settled while the mirror is still ringing.
+    Runs on a VirtualClock so timing is deterministic and instant.
+    """
+
+    FINAL_STABLE_S = 0.0199
+
+    def _run_trace(self, move_poll_s, settle_time_s=None):
+        clock = VirtualClock()
+        fake = FakeMR1530Serial(
+            bit4_trace=MEASURED_SETTLE_TRACE_2026_09_25, clock=clock,
+        )
+        with patch.object(mr1530_module, "time", clock), \
+                patch.object(mr1530_module, "_MOVE_POLL_S", move_poll_s):
+            mc = make_controller(fake, move_timeout_s=1.0)
+            mc._send_xy(0.3, 0.0)
+            t0 = fake.last_move_time
+            if settle_time_s is None:
+                mc._wait_move(label="trace")
+            else:
+                mc.wait_for_settle(settle_time_s=settle_time_s)
+        return fake, clock.now - t0
+
+    def test_wait_move_does_not_return_before_chatter_ends(self):
+        # Sweep the poll interval so reads land at many different phases
+        # of the trace, including dense polling right through the chatter.
+        for poll_s in (0.0, 0.0001, 0.0002, 0.0004, 0.0007, 0.001, 0.0015,
+                       0.002, 0.003, 0.005, mr1530_module._MOVE_POLL_S):
+            with self.subTest(move_poll_s=poll_s):
+                fake, elapsed = self._run_trace(poll_s)
+                self.assertGreaterEqual(
+                    elapsed, self.FINAL_STABLE_S,
+                    f"_wait_move() returned at {elapsed * 1000:.2f} ms, "
+                    "inside the measured chatter window (stays stable "
+                    "only from 19.9 ms).",
+                )
+                self.assertEqual(len(fake.move_commands), 1)
+
+    def test_wait_for_settle_with_production_poll_interval(self):
+        fake, elapsed = self._run_trace(
+            mr1530_module._MOVE_POLL_S, settle_time_s=0.05,
+        )
+        self.assertGreaterEqual(elapsed, self.FINAL_STABLE_S + 0.05)
+        self.assertEqual(len(fake.move_commands), 1)
+
+    def test_recheck_after_settle_sleep_rewaits_without_commanding_motion(self):
+        """Mirror holds stable long enough to pass the hold window, then
+        goes unstable during the settle_time_s sleep. The post-sleep
+        re-check must catch it and wait again -- polling only, no move."""
+        clock = VirtualClock()
+        trace = ((0.0, True), (0.001, False), (0.015, True), (0.2, False))
+        fake = FakeMR1530Serial(bit4_trace=trace, clock=clock)
+        with patch.object(mr1530_module, "time", clock), \
+                patch.object(mr1530_module, "_MOVE_POLL_S", 0.001):
+            mc = make_controller(fake, move_timeout_s=1.0)
+            mc._send_xy(0.1, 0.0)
+            t0 = fake.last_move_time
+            with self.assertLogs(mr1530_module.logger, level="WARNING") as logs:
+                mc.wait_for_settle(settle_time_s=0.02)
+        self.assertTrue(any("Settle re-check" in m for m in logs.output))
+        self.assertGreaterEqual(clock.now - t0, 0.2)
+        self.assertEqual(fake.move_commands, ["XY=0.100000;0.000000"])
+
+    def test_status_parses_real_firmware_formats(self):
+        fake = FakeMR1530Serial(status_bit4_sequence=[True, False])
+        mc = make_controller(fake)
+        self.assertEqual(mc._get_status(), 1 << mr1530_module._STATUS_BIT_MIRROR_NOT_STABLE)
+        self.assertEqual(mc._get_status(), 0)
 
 
 class ProModeProtocolTests(unittest.TestCase):

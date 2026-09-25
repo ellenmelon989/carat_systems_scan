@@ -30,6 +30,16 @@ timeout is unchanged and deliberate, since this firmware has no
 stop/abort command to recover TO. Still functionally complete, still
 untested against real hardware.
 
+v5 (2026-09-25): first real-hardware contact (MR-E-3 on COM7, 256000 8N1,
+START -> OK). Real STATUS replies are "0000000000" when stable and
+"0x00000010" when bit 4 is set; int(resp, 16) parses both. A fast-poll
+trace showed bit 4 chattering for ~5 ms after a ~10 deg step (stable
+gaps up to ~0.8 ms between unstable blips), so _wait_move() now requires
+bit 4 to read clear on EVERY poll for _SETTLE_HOLD_S instead of trusting
+a two-point-sample confirm, and wait_for_settle() re-checks STATUS after
+its settle_time_s sleep. Neither change commands any motion -- the v4
+freeze-don't-recover policy is unchanged.
+
 SIMPLE SERIAL MODE (moves, settle, handshake) -- from the Operation Manual
 -----------------------------------------------------------------------------
   - Serial framing: 256000 baud, 8 data bits, 1 stop bit, no parity,
@@ -288,7 +298,17 @@ _DEFAULT_MOVE_TIMEOUT = 30.0
 _DEFAULT_SERIAL_TIMEOUT = 2.0
 _DEFAULT_MOTION_ENABLED = False
 _MOVE_POLL_S = 0.05
-_SETTLE_CONFIRM_DELAY_S = 0.1
+
+# Settle hold window: STATUS bit 4 must read clear on EVERY poll for this
+# long before a move counts as settled. Measured 2026-09-25 on real
+# hardware: bit 4 chatters for ~5 ms after a 10 deg step (stable gaps up
+# to ~0.8 ms between unstable blips), so a two-sample confirm can be
+# fooled. 5 ms ~= 6x the longest measured stable gap.
+_SETTLE_HOLD_S = 0.005
+
+# Below this, wait_for_settle() warns: the post-settle sleep is the
+# second line of defence against residual ringing.
+_MIN_SETTLE_TIME_S = 0.02
 _UNIT_CIRCLE_TOLERANCE = 1e-9
 
 
@@ -550,14 +570,37 @@ class MR1530Controller(MotionController):
         self._send_xy(norm_x, norm_y)
 
     def wait_for_settle(self, settle_time_s: float):
-        """Block until STATUS bit 4 ('Mirror not stable') clears, then
-        sleep settle_time_s. Mirrors ConexAGAPController._wait_move()'s
-        double-read confirmation and MotionFault/AxisStateUnknown
-        escalation contract."""
+        """Block until STATUS bit 4 ('Mirror not stable') has held clear
+        for _SETTLE_HOLD_S (see _wait_move()), sleep settle_time_s, then
+        re-check STATUS once. If the mirror went unstable again during
+        the sleep, wait for it to re-settle via _wait_move() -- this
+        only polls STATUS and commands NO motion, so it is consistent
+        with the v4 freeze-don't-recover policy. Same
+        MotionFault/AxisStateUnknown escalation contract as
+        ConexAGAPController._wait_move()."""
         self._wait_move(label="Settle")
+        if settle_time_s < _MIN_SETTLE_TIME_S:
+            logger.warning(
+                "settle_time_s=%.4f s is below %.3f s -- the post-settle "
+                "sleep is the second line of defence against residual "
+                "mirror ringing after the STATUS hold window.",
+                settle_time_s, _MIN_SETTLE_TIME_S,
+            )
         if settle_time_s > 0:
             logger.debug("Settling %.3f s", settle_time_s)
             time.sleep(settle_time_s)
+
+        label = "Settle re-check"
+        status = self._read_status_or_raise(label)
+        self._check_fault_bits(status, label)
+        if status & (1 << _STATUS_BIT_MIRROR_NOT_STABLE):
+            logger.warning(
+                "[%s] Mirror reported NOT stable (STATUS=0x%08X) after the "
+                "%.3f s post-settle sleep -- waiting for it to re-settle "
+                "(no motion commanded).",
+                label, status, settle_time_s,
+            )
+            self._wait_move(label=label)
 
     def _require_motion_permission(self, operation: str):
         """Fail-closed interlock -- same pattern as both prior controllers."""
@@ -737,58 +780,80 @@ class MR1530Controller(MotionController):
         except ValueError as exc:
             raise RuntimeError(f"Malformed STATUS response: {resp!r}") from exc
 
+    def _read_status_or_raise(self, label: str) -> int:
+        """_get_status(), with any failure re-raised as the "Lost
+        communication with MR-E-3" RuntimeError _wait_move() has always
+        raised on a dead STATUS read."""
+        try:
+            return self._get_status()
+        except Exception as exc:
+            raise RuntimeError(
+                f"[{label}] Lost communication with MR-E-3 while waiting: {exc}"
+            ) from exc
+
+    def _check_fault_bits(self, status: int, label: str):
+        """Raise MotionFault if STATUS carries a current-limit,
+        average-current-limit, or mirror-temperature-limit bit. Checked
+        on EVERY STATUS read during settling, hold-window reads
+        included."""
+        if status & (1 << _STATUS_BIT_CURRENT_LIMIT) or status & (1 << _STATUS_BIT_CURRENT_AVG_LIMIT):
+            raise MotionFault(
+                f"[{label}] MR-15-30 output current limit reached "
+                f"(STATUS=0x{status:08X}) -- motion may be incomplete."
+            )
+        if status & (1 << _STATUS_BIT_MIRROR_TEMP_LIMIT):
+            raise MotionFault(
+                f"[{label}] MR-15-30 mirror temperature threshold "
+                f"reached (STATUS=0x{status:08X})."
+            )
+
     def _wait_move(self, label: str = ""):
-        """Block until STATUS bit 4 ('Mirror not stable') clears, or
-        raise. Structurally mirrors ConexAGAPController._wait_move()'s
-        double-read confirmation and MotionFault/AxisStateUnknown
-        escalation. There is no documented stop command in this
-        firmware (confirmed absent from both the Simple Serial command
-        table and every method in Optotune's own SDK) -- a timeout here
-        raises AxisStateUnknown directly, with nothing to try first, but
-        (v4) first makes a best-effort diagnostic read of the board-fault
+        """Block until STATUS bit 4 ('Mirror not stable') has read clear
+        on every poll for a continuous _SETTLE_HOLD_S window, or raise.
+
+        v5 (2026-09-25): replaced the old two-sample confirm (one stable
+        read, sleep, one more stable read) with this hold window. Real
+        hardware showed bit 4 chattering for ~5 ms after a ~10 deg step,
+        with stable gaps up to ~0.8 ms between unstable blips -- two
+        point samples can both land in stable gaps with a blip between
+        them. Polling continuously through the hold window closes that
+        gap. Fault bits are checked on every read, hold-window reads
+        included (the old confirm read never checked them).
+
+        There is no documented stop command in this firmware (confirmed
+        absent from both the Simple Serial command table and every
+        method in Optotune's own SDK) -- a timeout here raises
+        AxisStateUnknown directly, with nothing to try first, but (v4)
+        first makes a best-effort diagnostic read of the board-fault
         register via _diagnose_timeout_fault() and folds it into the
-        raised message -- diagnosis only, never a reason to auto-command
-        another move. See the module docstring's V4 UPDATE section."""
+        raised message -- diagnosis only, never a reason to
+        auto-command another move. See the module docstring's V4 UPDATE
+        section."""
         deadline = time.monotonic() + self._move_timeout
         while time.monotonic() < deadline:
-            try:
-                status = self._get_status()
-            except Exception as exc:
-                raise RuntimeError(
-                    f"[{label}] Lost communication with MR-E-3 while waiting: {exc}"
-                ) from exc
-
-            if status & (1 << _STATUS_BIT_CURRENT_LIMIT) or status & (1 << _STATUS_BIT_CURRENT_AVG_LIMIT):
-                raise MotionFault(
-                    f"[{label}] MR-15-30 output current limit reached "
-                    f"(STATUS=0x{status:08X}) -- motion may be incomplete."
-                )
-            if status & (1 << _STATUS_BIT_MIRROR_TEMP_LIMIT):
-                raise MotionFault(
-                    f"[{label}] MR-15-30 mirror temperature threshold "
-                    f"reached (STATUS=0x{status:08X})."
-                )
-
+            status = self._read_status_or_raise(label)
+            self._check_fault_bits(status, label)
             if not (status & (1 << _STATUS_BIT_MIRROR_NOT_STABLE)):
-                time.sleep(_SETTLE_CONFIRM_DELAY_S)
-                try:
-                    status2 = self._get_status()
-                except Exception as exc:
-                    raise RuntimeError(
-                        f"[{label}] Lost communication with MR-E-3 while waiting: {exc}"
-                    ) from exc
-                if not (status2 & (1 << _STATUS_BIT_MIRROR_NOT_STABLE)):
-                    return
-                logger.debug(
-                    "[%s] Reported stable then unstable again on confirm "
-                    "read -- treating as still settling.", label,
-                )
+                hold_start = time.monotonic()
+                while time.monotonic() - hold_start < _SETTLE_HOLD_S:
+                    status2 = self._read_status_or_raise(label)
+                    self._check_fault_bits(status2, label)
+                    if status2 & (1 << _STATUS_BIT_MIRROR_NOT_STABLE):
+                        logger.debug(
+                            "[%s] Stable then unstable within %.1f ms hold "
+                            "window -- still settling.",
+                            label, _SETTLE_HOLD_S * 1000,
+                        )
+                        break
+                else:
+                    return  # held stable for the full window
             time.sleep(_MOVE_POLL_S)
 
         fault_note = self._diagnose_timeout_fault()
         raise AxisStateUnknown(
-            f"[{label}] Mirror did not report stable (STATUS bit "
-            f"{_STATUS_BIT_MIRROR_NOT_STABLE}) within {self._move_timeout:.1f} s, "
+            f"[{label}] Mirror did not hold stable (STATUS bit "
+            f"{_STATUS_BIT_MIRROR_NOT_STABLE} clear) for "
+            f"{_SETTLE_HOLD_S * 1000:.1f} ms within {self._move_timeout:.1f} s, "
             "and this firmware has no documented stop command to fall back "
             "on. Axis state is unknown -- do not issue further moves "
             f"without checking the hardware. {fault_note}"
