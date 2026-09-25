@@ -40,6 +40,18 @@ a two-point-sample confirm, and wait_for_settle() re-checks STATUS after
 its settle_time_s sleep. Neither change commands any motion -- the v4
 freeze-don't-recover policy is unchanged.
 
+ORIGIN PERSISTENCE (2026-09-25): the Calibrate tab anchors scan-grid
+(0, 0) at the reference mark via zero_here(). That origin used to live
+only in the controller object, so a scan started after a program restart
+(hard_home: false -> resume()) silently used the mirror's absolute centre
+instead, shifting the whole grid. Because this mirror reports ABSOLUTE
+position, the origin is now persisted: calibration writes
+motion.origin_abs_deg_x/y (raw mechanical degrees, before invert_x/y), the
+constructor restores them, and resume() refuses to run with no origin at
+all rather than guessing. Re-run calibration whenever the mirror or
+scanner is physically moved -- the stored angles are only valid for the
+geometry they were measured in.
+
 SIMPLE SERIAL MODE (moves, settle, handshake) -- from the Operation Manual
 -----------------------------------------------------------------------------
   - Serial framing: 256000 baud, 8 data bits, 1 stop bit, no parity,
@@ -370,6 +382,7 @@ class MR1530Controller(MotionController):
             motion_cfg.get("motion_enabled", _DEFAULT_MOTION_ENABLED)
         )
         self._move_timeout = float(motion_cfg.get("move_timeout_s", _DEFAULT_MOVE_TIMEOUT))
+        self._warned_short_settle = False  # log the short-settle warning once, not per move
         serial_timeout = float(motion_cfg.get("serial_timeout_s", _DEFAULT_SERIAL_TIMEOUT))
 
         self._homed = False
@@ -378,6 +391,11 @@ class MR1530Controller(MotionController):
         # to. Set by home()/zero_here().
         self._origin_x = 0.0
         self._origin_y = 0.0
+        # Where the current origin came from: None (no origin yet),
+        # "config" (persisted by a previous calibration), "hard_home", or
+        # "zero_here". resume() in soft-home mode refuses to run on None.
+        self._origin_source = None
+        self._load_persisted_origin(motion_cfg)
 
         # Set BEFORE the connect attempt so close()/__del__ always have a
         # real attribute to check -- same reasoning as
@@ -440,6 +458,7 @@ class MR1530Controller(MotionController):
             self._wait_move(label="Home")
             self._origin_x = 0.0
             self._origin_y = 0.0
+            self._origin_source = "hard_home"
             self._homed = True
             logger.info("Homing complete. Origin (mechanical deg): 0.0, 0.0")
         else:
@@ -449,12 +468,20 @@ class MR1530Controller(MotionController):
         """Same hard_home-gated contract as ConexAGAPController.resume()."""
         if self._hard_home:
             self.home()
-        else:
-            self._homed = True
-            logger.info(
-                "Resuming (soft home) without re-zeroing: origin left at "
-                "(%.5f, %.5f) mechanical deg.", self._origin_x, self._origin_y,
+            return
+        if self._origin_source is None:
+            raise MotionFault(
+                "MR-15-30 resume() blocked: no scan origin. hard_home is "
+                "false, config.yaml has no motion.origin_abs_deg_x/y, and "
+                "nothing was zeroed in this session. Run calibration (the "
+                "Calibrate tab) first -- it saves the reference-mark origin."
             )
+        self._homed = True
+        logger.info(
+            "Resuming (soft home) without re-zeroing: origin (%s) at "
+            "(%.5f, %.5f) mechanical deg.",
+            self._origin_source, self._origin_x, self._origin_y,
+        )
 
     def zero_here(self):
         """
@@ -466,9 +493,52 @@ class MR1530Controller(MotionController):
         mech_x, mech_y = self._read_actual_mechanical_deg()
         self._origin_x = mech_x
         self._origin_y = mech_y
+        self._origin_source = "zero_here"
         self._homed = True
         logger.info(
             "Zeroed. Origin (mechanical deg): %.5f, %.5f", mech_x, mech_y,
+        )
+
+    def get_origin_abs_deg(self):
+        """Current scan-grid origin as RAW absolute mechanical degrees
+        (x, y), or None if no origin has been set. What calibration
+        persists as motion.origin_abs_deg_x/y."""
+        if self._origin_source is None:
+            return None
+        return (self._origin_x, self._origin_y)
+
+    def _load_persisted_origin(self, motion_cfg: dict):
+        """Restore motion.origin_abs_deg_x/y written by a previous
+        calibration. Both or neither must be set; values outside the
+        mirror's +/-25 deg mechanical range mean a corrupt or foreign
+        config and are rejected rather than clamped."""
+        raw_x = motion_cfg.get("origin_abs_deg_x")
+        raw_y = motion_cfg.get("origin_abs_deg_y")
+        if raw_x is None and raw_y is None:
+            return
+        if raw_x is None or raw_y is None:
+            raise ValueError(
+                "motion.origin_abs_deg_x and origin_abs_deg_y must be set "
+                "together (or both left out) -- re-run calibration."
+            )
+        limit = _MAX_OPTICAL_DEG / _MECH_TO_OPTICAL
+        origin = []
+        for key, raw in (("origin_abs_deg_x", raw_x), ("origin_abs_deg_y", raw_y)):
+            try:
+                val = float(raw)
+            except (TypeError, ValueError) as exc:
+                raise ValueError(f"motion.{key}={raw!r} is not a number.") from exc
+            if not math.isfinite(val) or abs(val) > limit:
+                raise ValueError(
+                    f"motion.{key}={val} is outside the mirror's +/-{limit:g} "
+                    "deg mechanical range -- re-run calibration."
+                )
+            origin.append(val)
+        self._origin_x, self._origin_y = origin
+        self._origin_source = "config"
+        logger.info(
+            "Restored calibrated origin from config: (%.5f, %.5f) mechanical deg.",
+            self._origin_x, self._origin_y,
         )
 
     def move_to(self, x_mm: float, y_mm: float):
@@ -579,7 +649,8 @@ class MR1530Controller(MotionController):
         MotionFault/AxisStateUnknown escalation contract as
         ConexAGAPController._wait_move()."""
         self._wait_move(label="Settle")
-        if settle_time_s < _MIN_SETTLE_TIME_S:
+        if settle_time_s < _MIN_SETTLE_TIME_S and not self._warned_short_settle:
+            self._warned_short_settle = True
             logger.warning(
                 "settle_time_s=%.4f s is below %.3f s -- the post-settle "
                 "sleep is the second line of defence against residual "

@@ -4,3 +4,8 @@ __pycache__/
 scan_data/
 scan_data_smoketest/
 venv/
+
+# MR-15-30 on-site switchover (tools/mr1530_onsite.py) -- local, per-machine
+switchover_results/
+config.backup_before_mr1530_*.yaml
+config.trial_mr1530_*.yaml

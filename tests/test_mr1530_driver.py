@@ -321,6 +321,81 @@ class SettleChatterTraceTests(unittest.TestCase):
         self.assertEqual(mc._get_status(), 0)
 
 
+class OriginPersistenceTests(unittest.TestCase):
+    """2026-09-25: the calibration's reference-mark origin is persisted as
+    motion.origin_abs_deg_x/y so a scan after a program restart
+    (hard_home: false -> resume()) uses the same grid instead of silently
+    re-anchoring at the mirror's absolute centre."""
+
+    def test_restart_restores_origin_from_config(self):
+        # Session 1: calibrate -- zero at the reference mark (2.0, -1.5 deg).
+        fake = FakeMR1530Serial()
+        mc = make_controller(fake, hard_home=False)
+        fake.norm_x, fake.norm_y = mc._mm_to_xy_from_mech_deg(2.0, -1.5)
+        mc.zero_here()
+        ox, oy = mc.get_origin_abs_deg()
+        mc.close()
+        # Session 2: fresh controller from the persisted values.
+        fake2 = FakeMR1530Serial(initial_norm_x=fake.norm_x, initial_norm_y=fake.norm_y)
+        mc2 = make_controller(fake2, hard_home=False, origin_abs_deg_x=ox, origin_abs_deg_y=oy)
+        mc2.resume()
+        self.assertEqual(fake2.move_commands, [])
+        px, py = mc2.get_position_deg()
+        self.assertAlmostEqual(px, 0.0, places=4)
+        self.assertAlmostEqual(py, 0.0, places=4)
+
+    def test_soft_resume_without_any_origin_refuses(self):
+        mc = make_controller(FakeMR1530Serial(), hard_home=False)
+        self.assertIsNone(mc.get_origin_abs_deg())
+        with self.assertRaises(MotionFault):
+            mc.resume()
+
+    def test_hard_home_ignores_persisted_origin(self):
+        fake = FakeMR1530Serial()
+        mc = make_controller(fake, hard_home=True, origin_abs_deg_x=3.0, origin_abs_deg_y=1.0)
+        mc.resume()
+        self.assertEqual(mc.get_origin_abs_deg(), (0.0, 0.0))
+
+    def test_only_one_origin_key_is_rejected(self):
+        with self.assertRaises(ValueError):
+            make_controller(FakeMR1530Serial(), origin_abs_deg_x=1.0)
+
+    def test_out_of_range_origin_is_rejected(self):
+        with self.assertRaises(ValueError):
+            make_controller(FakeMR1530Serial(), origin_abs_deg_x=40.0, origin_abs_deg_y=0.0)
+
+    def test_write_results_persists_origin(self):
+        import tempfile
+        from pathlib import Path
+        import yaml
+        from scan.calibrate_scan_area import persisted_origin_results, write_results
+
+        fake = FakeMR1530Serial()
+        mc = make_controller(fake, hard_home=False)
+        fake.norm_x, fake.norm_y = mc._mm_to_xy_from_mech_deg(1.25, -0.75)
+        mc.zero_here()
+        results = {
+            "x_range_mm": [-10.0, 10.0], "y_range_mm": [-10.0, 10.0],
+            "wafer_center_mm": [0.0, 0.0], "wafer_radius_mm": 10.0,
+            "step_size_mm": 2.0, "dwell_time_s": 1.0, "passes": 1,
+        }
+        results.update(persisted_origin_results(mc))
+        text = (
+            "motion:\n  controller: mr1530\n  deg_per_mm_x: 0.05  # note\n"
+            "  deg_per_mm_y: 0.05\n  hard_home: false\n"
+            "scan:\n  x_range_mm: [0, 0]\n  y_range_mm: [0, 0]\n"
+            "  wafer_center_mm: [0, 0]\n  step_size_mm: 1\n  dwell_time_s: 1\n"
+        )
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "config.yaml"
+            path.write_text(text, encoding="utf-8")
+            write_results(path, results)
+            motion = yaml.safe_load(path.read_text(encoding="utf-8"))["motion"]
+        self.assertAlmostEqual(motion["origin_abs_deg_x"], 1.25, places=5)
+        self.assertAlmostEqual(motion["origin_abs_deg_y"], -0.75, places=5)
+        self.assertEqual(persisted_origin_results(object()), {})
+
+
 class ProModeProtocolTests(unittest.TestCase):
     def test_fault_register_round_trip_survives_byte_stuffing(self):
         """0x7E7D0102 deliberately contains both bytes the Pro-mode

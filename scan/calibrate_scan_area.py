@@ -709,6 +709,19 @@ def _patch_or_insert_scalar(text: str, key: str, new_value: str, after_key: str)
     return text[:insert_at] + f"\n{indent}{key}: {new_value}" + text[insert_at:]
 
 
+def persisted_origin_results(motion) -> dict:
+    """{"origin_abs_deg_x": .., "origin_abs_deg_y": ..} for controllers
+    that can persist their origin as an absolute angle (currently only
+    MR1530Controller, via get_origin_abs_deg()), else {}. Called at
+    write time, after the reference-mark zero_here(), so the value is the
+    reference mark's absolute position."""
+    getter = getattr(motion, "get_origin_abs_deg", None)
+    origin = getter() if callable(getter) else None
+    if origin is None:
+        return {}
+    return {"origin_abs_deg_x": origin[0], "origin_abs_deg_y": origin[1]}
+
+
 def write_results(config_path: Path, results: dict):
     """
     Patch config.yaml with the calibration results.
@@ -769,6 +782,16 @@ def write_results(config_path: Path, results: dict):
         # ConexAGAPController._require_motion_permission()'s docstring.
         # This function's OWN job -- measuring and writing real deg_per_mm_x/y
         # -- is unchanged; only the now-irrelevant flag write was removed.
+
+    # Persisted scan origin (MR-15-30 only -- see
+    # MR1530Controller.get_origin_abs_deg()): the reference mark's RAW
+    # absolute mechanical angle, so a scan started after a program restart
+    # lands on the same grid instead of re-anchoring at the mirror centre.
+    if "origin_abs_deg_x" in results:
+        _try(_patch_or_insert_scalar, "origin_abs_deg_x", "origin_abs_deg_x",
+             f"{results['origin_abs_deg_x']:.6f}", "deg_per_mm_y")
+        _try(_patch_or_insert_scalar, "origin_abs_deg_y", "origin_abs_deg_y",
+             f"{results['origin_abs_deg_y']:.6f}", "origin_abs_deg_x")
 
     if "home_steps" in results:
         _try(_patch_or_insert_scalar, "home_steps", "home_steps",
@@ -964,6 +987,7 @@ def main():
     if deg_per_mm_result["recalibrated"]:
         results["deg_per_mm_x"] = deg_per_mm_result["deg_per_mm_x"]
         results["deg_per_mm_y"] = deg_per_mm_result["deg_per_mm_y"]
+    results.update(persisted_origin_results(motion))
     write_results(config_path, results)
 
     if input("\nRun the scan now using this calibration? [y/N] ").strip().lower() == "y":

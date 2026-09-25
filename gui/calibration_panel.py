@@ -52,6 +52,7 @@ from scan.calibrate_scan_area import (
     compute_radius_mm,
     edges_deg_to_mm,
     validate_jog_checkpoint_interval_deg,
+    persisted_origin_results,
     write_results,
 )
 from scan.scan_manager import generate_grid
@@ -727,6 +728,9 @@ class CalibrationPanel(ttk.Frame):
         if self.deg_per_mm_result["recalibrated"]:
             results["deg_per_mm_x"] = self.deg_per_mm_result["deg_per_mm_x"]
             results["deg_per_mm_y"] = self.deg_per_mm_result["deg_per_mm_y"]
+        # MR-15-30: persist the reference-mark origin so a scan after a
+        # program restart uses the same grid (no-op for other controllers).
+        results.update(persisted_origin_results(self.motion))
 
         try:
             failed = write_results(self.config_path, results)
