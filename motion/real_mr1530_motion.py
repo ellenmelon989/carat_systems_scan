@@ -607,15 +607,14 @@ class MR1530Controller(MotionController):
         worse than its repeatability (40 urad), so substituting commanded
         for measured position would defeat the reason this project
         calibrates against real closed-loop feedback at all.
+
+        Raises AxisStateUnknown if the read fails -- never returns a
+        placeholder (see _read_actual_mechanical_deg()).
         """
-        try:
-            mech_x, mech_y = self._read_actual_mechanical_deg()
-            u = mech_x - self._origin_x
-            v = mech_y - self._origin_y
-            return (u / self._eff_deg_per_mm_x, v / self._eff_deg_per_mm_y)
-        except Exception as exc:
-            logger.warning("get_position() failed: %s", exc)
-            return (0.0, 0.0)
+        mech_x, mech_y = self._read_actual_mechanical_deg()
+        u = mech_x - self._origin_x
+        v = mech_y - self._origin_y
+        return (u / self._eff_deg_per_mm_x, v / self._eff_deg_per_mm_y)
 
     def _move_to_impl(self, x_mm: float, y_mm: float, label: str):
         self._require_motion_permission(label)
@@ -732,13 +731,32 @@ class MR1530Controller(MotionController):
         the mode switch or either register read fails; does NOT silently
         fall back to Simple mode on error, since a caller relying on this
         for closed-loop feedback should see a real failure, not a
-        plausible-looking wrong number."""
-        self._enter_pro_mode()
+        plausible-looking wrong number.
+
+        Any failure is re-raised as AxisStateUnknown (2026-10-02, from the
+        on-site report): get_position() used to catch everything and return
+        (0.0, 0.0), which jog() and adaptive_scan's TravelGuard then treated
+        as "at origin" -- a relative jog became an absolute move to the jog
+        delta, and the travel/limit check always passed. A failed read also
+        may leave the controller in Pro mode, so the axis state really is
+        unconfirmed: callers must not move again without a human check."""
         try:
-            norm_x = self._pro_get_float(_REG_MIRROR_COORD_X)
-            norm_y = self._pro_get_float(_REG_MIRROR_COORD_Y)
-        finally:
-            self._exit_pro_mode()
+            self._enter_pro_mode()
+            try:
+                norm_x = self._pro_get_float(_REG_MIRROR_COORD_X)
+                norm_y = self._pro_get_float(_REG_MIRROR_COORD_Y)
+            finally:
+                self._exit_pro_mode()
+        except AxisStateUnknown:
+            raise
+        except Exception as exc:
+            raise AxisStateUnknown(
+                f"MR-15-30 position read failed ({type(exc).__name__}: {exc}). "
+                "Actual mirror position is unknown -- no placeholder is "
+                "returned. Do not move again until the controller link has "
+                "been checked (reconnect; power-cycle the MR-E-3 if it does "
+                "not answer)."
+            ) from exc
         return self._xy_to_mech_deg(norm_x, norm_y)
 
     def _read_fault_register(self) -> int:

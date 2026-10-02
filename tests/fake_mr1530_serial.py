@@ -109,6 +109,9 @@ class FakeMR1530Serial:
       - fault_register_value / fault_register_readable: the Pro-mode
         board-fault register (0x1007) _diagnose_timeout_fault() reads
         on a settle timeout.
+      - position_readable: False makes the Pro-mode mirror-coordinate
+        registers (0x3B00/0x3B01) go unanswered, like a dead link mid-read,
+        to exercise the position-readback failure path (2026-10-02).
     """
 
     def __init__(
@@ -121,6 +124,7 @@ class FakeMR1530Serial:
         temp_limit=False,
         fault_register_value=0,
         fault_register_readable=True,
+        position_readable=True,
         initial_norm_x=0.0,
         initial_norm_y=0.0,
         bit4_trace=None,
@@ -140,6 +144,7 @@ class FakeMR1530Serial:
         self.temp_limit = temp_limit
         self.fault_register_value = fault_register_value
         self.fault_register_readable = fault_register_readable
+        self.position_readable = position_readable
         self._status_call_count = 0
 
         if bit4_trace is not None and clock is None:
@@ -254,6 +259,10 @@ class FakeMR1530Serial:
         body = core[3:3 + size]
         if cmd_id == mr1530_module._PRO_CMD_GET_VALUE:
             register_id = struct.unpack(">H", body[:2])[0]
+            if (not self.position_readable and register_id in (
+                    mr1530_module._REG_MIRROR_COORD_X,
+                    mr1530_module._REG_MIRROR_COORD_Y)):
+                return  # no reply queued -- same "dead link" model as below
             if register_id == mr1530_module._REG_MIRROR_COORD_X:
                 resp_payload = struct.pack(">f", self.norm_x)
             elif register_id == mr1530_module._REG_MIRROR_COORD_Y:

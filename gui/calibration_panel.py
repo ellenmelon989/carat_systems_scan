@@ -296,7 +296,7 @@ class CalibrationPanel(ttk.Frame):
     def _refresh_position(self):
         if self.motion is None:
             self.pos_var.set("Position: --")
-            return
+            return False
         # Shows the RAW absolute controller position (get_absolute_position_deg()),
         # not the origin-relative one (get_position_deg()) -- deliberately, per
         # 2026-08-06 operator report: a relative reading like "-0.38" gave no
@@ -307,8 +307,24 @@ class CalibrationPanel(ttk.Frame):
         # and the same one calibration_jog_deg()'s target is validated
         # against. See MotionController.get_absolute_position_deg()'s
         # docstring and MEMORY carat_scanner_2026-08-06_gui_absolute_position_display.
-        x, y = self.motion.get_absolute_position_deg()
+        try:
+            x, y = self.motion.get_absolute_position_deg()
+        except Exception as exc:
+            self._position_read_failed(exc)
+            return False
         self.pos_var.set(f"Position (abs): {x:.4f}, {y:.4f} deg")
+        return True
+
+    def _position_read_failed(self, exc):
+        """A live position read raised (AxisStateUnknown for the MR-15-30).
+        Abort calibration rather than record or display a position that
+        was never measured."""
+        self._abort(
+            f"Lost the mirror position read ({exc}). Nothing further was "
+            "sent to the mirror. Restart calibration; if it happens again, "
+            "power-cycle the MR-E-3 controller."
+        )
+        self.pos_var.set("Position: UNKNOWN (read failed)")
 
     def _start_position_poll(self):
         if self._position_poll_job is not None:
@@ -316,6 +332,8 @@ class CalibrationPanel(ttk.Frame):
 
         def _tick():
             self._refresh_position()
+            if self._position_poll_job is None:
+                return  # poll was stopped during the refresh (read failure -> abort)
             self._position_poll_job = self.after(300, _tick)
 
         self._position_poll_job = self.after(300, _tick)
@@ -389,8 +407,13 @@ class CalibrationPanel(ttk.Frame):
         ]
         self._log("Running clearance check (small test jog in each direction)...")
         for label, dx, dy in directions:
-            self.motion.calibration_jog_deg(dx_deg=dx, dy_deg=dy)
-            self._refresh_position()
+            try:
+                self.motion.calibration_jog_deg(dx_deg=dx, dy_deg=dy)
+            except MotionFault as exc:
+                self._abort(f"Clearance check jog {label} failed: {exc}")
+                return False
+            if not self._refresh_position():
+                return False
             if not messagebox.askyesno("Clearance check", f"Jogged {label}. Did the spot visibly move?"):
                 self._abort(
                     f"No visible motion jogging {label} — check the optical "
@@ -417,7 +440,11 @@ class CalibrationPanel(ttk.Frame):
         self._set_jog_enabled(True)
 
     def _confirm_reference(self):
-        x, y = self.motion.get_position_deg()
+        try:
+            x, y = self.motion.get_position_deg()
+        except Exception as exc:
+            self._position_read_failed(exc)
+            return
         self.motion.zero_here()
         self._log(f"Origin zeroed at reference mark (was at {x:.4f}, {y:.4f} deg "
                   "in the provisional frame).")
@@ -446,7 +473,11 @@ class CalibrationPanel(ttk.Frame):
 
     def _confirm_edge(self):
         edge_name = EDGE_ORDER[self._edge_idx]
-        x, y = self.motion.get_position_deg()
+        try:
+            x, y = self.motion.get_position_deg()
+        except Exception as exc:
+            self._position_read_failed(exc)
+            return
         self.edges_deg[edge_name] = (x, y)
         self._log(f"Recorded {edge_name} edge at ({x:.4f}, {y:.4f}) deg")
         self._edge_idx += 1

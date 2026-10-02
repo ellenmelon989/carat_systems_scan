@@ -56,7 +56,7 @@ import numpy as np
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
-from motion.motion_controller import get_motion_controller
+from motion.motion_controller import MotionFault, get_motion_controller
 from readers.ir_reader_base import get_ir_reader
 from readers.spectrometer_reader_base import get_spectrometer_reader
 
@@ -419,6 +419,8 @@ class AdaptiveScanPanel(ttk.Frame):
 
         def _tick():
             self._refresh_readout()
+            if self._position_poll_job is None:
+                return  # poll was stopped during the refresh (read failure)
             self._position_poll_job = self.after(POSITION_POLL_INTERVAL_MS, _tick)
 
         self._position_poll_job = self.after(POSITION_POLL_INTERVAL_MS, _tick)
@@ -431,7 +433,15 @@ class AdaptiveScanPanel(ttk.Frame):
     def _refresh_readout(self):
         if self.motion is None:
             return
-        x, y = self.motion.get_position()
+        # get_position() raises (AxisStateUnknown for the MR-15-30) when the
+        # read fails -- it no longer returns a fake (0, 0). Unguarded, that
+        # exception would escape this Tk after() callback, kill the poll
+        # loop and leave a stale number on screen with jog still enabled.
+        try:
+            x, y = self.motion.get_position()
+        except Exception as exc:
+            self._motion_lost(f"Position read failed: {exc}")
+            return
         self.pos_var.set(f"Position: {x:.3f}, {y:.3f} mm")
 
         # Best-effort live signal readout -- purely informational (lets
@@ -489,8 +499,29 @@ class AdaptiveScanPanel(ttk.Frame):
     def _do_jog(self, dx_sign, dy_sign):
         if not self.jog_enabled or self.motion is None:
             return
-        self.motion.jog(dx_mm=dx_sign * self.jog_step_mm, dy_mm=dy_sign * self.jog_step_mm)
+        # Same reasoning as CalibrationPanel's jog handler (2026-07-28): a
+        # fault raised out of a Tk callback is otherwise invisible to the
+        # operator and leaves jog enabled for the next arrow-key repeat.
+        try:
+            self.motion.jog(dx_mm=dx_sign * self.jog_step_mm, dy_mm=dy_sign * self.jog_step_mm)
+        except MotionFault as exc:
+            self._motion_lost(f"Jog failed: {exc}")
+            return
         self._refresh_readout()
+
+    def _motion_lost(self, reason):
+        """Position is unknown or the mirror faulted: stop polling, lock the
+        jog pad and say so on screen. Deliberately sends nothing else to the
+        mirror and does not offer an in-place reconnect -- restarting the
+        program is the clean way to rebuild the motion + reader connections."""
+        self._stop_position_poll()
+        self._set_jog_enabled(False)
+        self.pos_var.set("Position: UNKNOWN (read failed)")
+        msg = (f"{reason}\n\nJogging is disabled and nothing further was sent to "
+               "the mirror. Close and reopen the scanner program to reconnect. "
+               "If it happens again, power-cycle the MR-E-3 controller.")
+        self._log(f"MOTION STOPPED: {reason}")
+        messagebox.showerror("Mirror position unknown", msg)
 
     def _halve_jog_step(self):
         self.jog_step_mm = max(JOG_STEP_MIN_MM, self.jog_step_mm / 2)

@@ -409,5 +409,53 @@ class ProModeProtocolTests(unittest.TestCase):
         self.assertEqual(result, tricky_value)
 
 
+class PositionReadFailureTests(unittest.TestCase):
+    """2026-10-02 on-site report: get_position() used to swallow a failed
+    Pro-mode read and return (0.0, 0.0). jog() then computed
+    (0,0)+delta and moved there -- an absolute jump disguised as a relative
+    jog -- and adaptive_scan's TravelGuard saw a failed read as 'at origin,
+    in bounds'. Every readback path must now raise AxisStateUnknown and
+    nothing downstream may send a move."""
+
+    def _homed_then_moved(self):
+        fake = FakeMR1530Serial()
+        mc = make_controller(fake)
+        mc.home()
+        mc.move_to(5.0, -3.0)
+        mc.wait_for_settle(0.0)
+        fake.position_readable = False
+        return fake, mc
+
+    def test_get_position_raises_instead_of_returning_origin(self):
+        _, mc = self._homed_then_moved()
+        with self.assertRaises(AxisStateUnknown):
+            mc.get_position()
+
+    def test_get_position_deg_and_absolute_also_raise(self):
+        _, mc = self._homed_then_moved()
+        with self.assertRaises(AxisStateUnknown):
+            mc.get_position_deg()
+        with self.assertRaises(AxisStateUnknown):
+            mc.get_absolute_position_deg()
+
+    def test_jog_sends_no_move_when_position_unreadable(self):
+        fake, mc = self._homed_then_moved()
+        sent_before = list(fake.move_commands)
+        with self.assertRaises(AxisStateUnknown):
+            mc.jog(dx_mm=1.0)
+        self.assertEqual(
+            fake.move_commands, sent_before,
+            "a failed read must stop jog() before any XY= is sent -- the old "
+            "(0,0) fallback would have commanded an absolute move to the delta.",
+        )
+
+    def test_calibration_jog_deg_sends_no_move_when_position_unreadable(self):
+        fake, mc = self._homed_then_moved()
+        sent_before = list(fake.move_commands)
+        with self.assertRaises(AxisStateUnknown):
+            mc.calibration_jog_deg(dx_deg=0.5)
+        self.assertEqual(fake.move_commands, sent_before)
+
+
 if __name__ == "__main__":
     unittest.main()
