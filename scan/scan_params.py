@@ -123,6 +123,9 @@ def grid_dims_from_range(x_range_mm, y_range_mm, step_size_mm: float):
     return nx, ny
 
 
+_RADIUS_TOL_MM = 1e-6
+
+
 def in_radius(x_mm: float, y_mm: float, center_mm, radius_mm: float) -> bool:
     """
     True if (x_mm, y_mm) is within radius_mm of center_mm.
@@ -141,9 +144,18 @@ def in_radius(x_mm: float, y_mm: float, center_mm, radius_mm: float) -> bool:
     issued to the largest-excursion points in the grid, which is also
     where the mount's own separate mechanical travel limit (independent
     of wafer shape) is most likely to be exceeded.
+
+    Boundary points count as inside, with a 1e-6 mm tolerance
+    (_RADIUS_TOL_MM). 2026-10-02 on-site: diameter 10 / step 5 queued 4
+    points instead of 5 -- with center (-6.219, 1.9891) the -X edge point
+    came out at d^2 - r^2 = +1.07e-14 from float noise in
+    linspace(cx - r, cx + r, n) and was masked off, while the mirror-image
+    +X point landed exactly on r and was kept. Same 1e-6 mm scale as
+    grid_dims_from_range()'s rounding: far below anything the calibration
+    can resolve, so it only absorbs float noise.
     """
     cx, cy = center_mm
-    return (x_mm - cx) ** 2 + (y_mm - cy) ** 2 <= radius_mm ** 2
+    return math.hypot(x_mm - cx, y_mm - cy) <= radius_mm + _RADIUS_TOL_MM
 
 
 def endpoint_from_angle(start_mm, angle_deg: float, length_mm: float):

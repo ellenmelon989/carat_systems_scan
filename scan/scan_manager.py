@@ -436,6 +436,19 @@ class ScanManager:
         try:
             self.ir_reader = get_ir_reader(config)
             self.spectrometer = get_spectrometer_reader(config)
+            # 2026-10-02 on-site: with OES enabled but the spectrometer not
+            # connected, the scan used to start and then die on the first
+            # point with OESStore's "wavelengths must be provided on the
+            # first write_point() call" -- which names the wrong problem.
+            # Fail here instead, before any motion, with the real cause.
+            if self.oes_enabled and self.spectrometer.wavelengths is None:
+                init_err = getattr(self.spectrometer, "_init_error", None)
+                raise RuntimeError(
+                    "OES is enabled but the spectrometer did not connect"
+                    + (f" ({init_err})" if init_err else "")
+                    + ". Connect/power the spectrometer, or uncheck OES "
+                    "for an IR-only scan."
+                )
         except Exception:
             # Without this, a config error here (e.g. a missing
             # ir.pac.temp_tag_name key) leaves the just-opened 8742/motion
@@ -507,6 +520,15 @@ class ScanManager:
         # same reason self.passes is resolved once in __init__ instead
         # of at every use site.
         self.scan_mode = self.scan_cfg["grid"].get("mode", "grid")
+        # IR-only scan with no spectrometer attached (2026-10-02 on-site):
+        # self.spectrometer.wavelengths is None, and every point passes
+        # wavelengths=None (OES skipped), so OESStore could never initialize
+        # and the first write_point() raised. Give it a zero-length spectral
+        # axis instead: the HDF5 file is still created up front with all the
+        # IR datasets, and intensity is just shape (..., 0).
+        store_wavelengths = self.spectrometer.wavelengths
+        if store_wavelengths is None and not self.oes_enabled:
+            store_wavelengths = np.empty(0, dtype="float32")
         hdf5_path = config["output"].get(
             "oes_hdf5",
             config["output"]["base_dir"] + "/oes.h5",
@@ -524,13 +546,13 @@ class ScanManager:
                 s_coords_mm=s_coords, line_x_mm=line_x, line_y_mm=line_y,
                 start_mm=line_start_mm, end_mm=line_end_mm,
                 n_passes=self.passes,
-                wavelengths=self.spectrometer.wavelengths,
+                wavelengths=store_wavelengths,
             )
         else:
             _, xs, ys = generate_grid(self.scan_cfg)
             self.store = OESStore(hdf5_path, mode="grid", x_coords_mm=xs, y_coords_mm=ys,
                                    n_passes=self.passes,
-                                   wavelengths=self.spectrometer.wavelengths)
+                                   wavelengths=store_wavelengths)
 
         self.logger = DataLogger(config, store=self.store)
 
