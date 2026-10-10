@@ -237,6 +237,9 @@ class App(tk.Tk):
             self.running = False
             self.control.set_running(False)
             self.status.log_message("Scan aborted.")
+        elif kind == "warning":
+            self.status.log_message(f"WARNING: {payload}")
+            messagebox.showwarning("Scan warning", payload)
         elif kind == "error":
             self.running = False
             self.control.set_running(False)

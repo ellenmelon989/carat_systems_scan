@@ -40,6 +40,9 @@ def run_scan(config, q, stop_event, motion=None, already_homed=False):
     hand-off (see the one-shot _pending_already_homed flag there).
 
     Puts one of the following onto q as the scan progresses:
+      ("warning", message) -- non-fatal, scan continues (e.g. invalid
+                             OES wavelength calibration); shown to the
+                             operator as a dialog + log line
       ("point", record)  -- once per point, forwarded straight from
                              ScanManager's on_point callback
       ("done", None)      -- scan finished normally, ran every point
@@ -65,6 +68,13 @@ def run_scan(config, q, stop_event, motion=None, already_homed=False):
     except Exception as exc:
         q.put(("error", _format_error("Failed to initialize scan hardware", exc)))
         return
+
+    # Non-fatal problems the operator must see before trusting the data
+    # (2026-10-10: an invalid OES wavelength calibration). The scan keeps
+    # running; the GUI shows a warning dialog + log line.
+    warning = getattr(manager, "calibration_warning", None)
+    if warning:
+        q.put(("warning", warning))
 
     try:
         status = manager.run(

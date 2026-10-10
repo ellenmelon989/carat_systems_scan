@@ -225,6 +225,16 @@ oes:
   integration_time_us: 20000
   num_averages: 3
   boxcar_width: 2
+  wavelength_calibration:
+    # Where the wavelength axis comes from (2026-10-10). auto = ADC1000-USB
+    # reads its channel-0 coefficients from EEPROM slots 2-5 (seabreeze's
+    # default slots 1-4 are off by one on this unit -> 1..2,000,000 nm axis);
+    # other spectrometers use slots 1-4. Options: auto | eeprom_slots_2_5 |
+    # eeprom_slots_1_4 | manual. manual uses coeffs below ([c0, c1, c2, c3],
+    # wavelength = c0 + c1*i + c2*i^2 + c3*i^3 for pixel i) and ignores the
+    # EEPROM -- use it for an Ocean calibration sheet or a fit to plasma lines.
+    source: auto
+    coeffs: null
   features:
     CH: 431.0
     C2_Swan: 516.0

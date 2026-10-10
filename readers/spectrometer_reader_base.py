@@ -45,6 +45,18 @@ class SpectrometerReader:
         """
         return getattr(self, "_wavelengths", None)
 
+    @property
+    def calibration_record(self) -> Optional[dict]:
+        """
+        Provenance + validity of the wavelength axis as a plain dict
+        (see readers/wavelength_calibration.py), or None for backends
+        that don't build one from hardware (mock, unimplemented
+        oceandirect). ScanManager writes this into metadata.yaml and
+        oes.h5 and warns loudly when valid is False.
+        """
+        cal = getattr(self, "wavelength_calibration", None)
+        return cal.to_record() if cal is not None else None
+
     def read(self) -> SpectrumReading:
         raise NotImplementedError
 
@@ -91,6 +103,7 @@ def get_spectrometer_reader(config) -> "SpectrometerReader":
             integration_time_us=integration_time_us,
             num_averages=num_averages,
             boxcar_width=boxcar_width,
+            wavelength_calibration=oes_cfg.get("wavelength_calibration"),
         )
 
     if backend == "oceandirect":

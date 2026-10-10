@@ -449,6 +449,27 @@ class ScanManager:
                     + ". Connect/power the spectrometer, or uncheck OES "
                     "for an IR-only scan."
                 )
+            # 2026-10-10: provenance + validity of the OES wavelength axis
+            # (readers/wavelength_calibration.py). Recorded with every scan
+            # (metadata.yaml + oes.h5 attrs) whether or not OES is enabled;
+            # only WARNED about when OES is actually being collected. Not a
+            # hard stop: the raw counts are still worth saving and the axis
+            # can be corrected afterwards (tools/fix_wavelength_axis.py), but
+            # the operator must not be able to miss it.
+            self.oes_calibration = getattr(self.spectrometer, "calibration_record", None)
+            self.calibration_warning = None
+            if (self.oes_enabled and self.oes_calibration is not None
+                    and not self.oes_calibration["valid"]):
+                lo, hi = self.oes_calibration["range_nm"]
+                self.calibration_warning = (
+                    "OES wavelength calibration is INVALID -- spectra will be "
+                    "saved, but their wavelength axis, feature values and peak "
+                    f"maps are not trustworthy. Axis {lo:.1f}-{hi:.1f} nm from "
+                    f"{self.oes_calibration['source']}. Problems: "
+                    + "; ".join(self.oes_calibration["problems"])
+                    + ". Check oes.wavelength_calibration in config.yaml and "
+                    "run tools/dump_spectrometer_eeprom.py."
+                )
         except Exception:
             # Without this, a config error here (e.g. a missing
             # ir.pac.temp_tag_name key) leaves the just-opened 8742/motion
@@ -554,7 +575,22 @@ class ScanManager:
                                    n_passes=self.passes,
                                    wavelengths=store_wavelengths)
 
+        if self.oes_calibration is not None:
+            self.store.write_attrs({"wavelength_calibration": self.oes_calibration})
+
         self.logger = DataLogger(config, store=self.store)
+        if self.oes_calibration is not None:
+            self.logger.log_event(
+                "OES " + ("" if self.oes_calibration["valid"] else "WARNING: ")
+                + "wavelength calibration "
+                + ("valid" if self.oes_calibration["valid"] else "INVALID")
+                + f": source={self.oes_calibration['source']} "
+                f"range={self.oes_calibration['range_nm'][0]:.1f}-"
+                f"{self.oes_calibration['range_nm'][1]:.1f} nm "
+                f"coeffs={self.oes_calibration['coeffs']}"
+            )
+        if self.calibration_warning:
+            self.logger.log_event(f"WARNING: {self.calibration_warning}")
 
     def _safe_rehome(self, context: str):
         """
@@ -645,7 +681,10 @@ class ScanManager:
         unaffected by this flag — those still run normally regardless,
         since they exist to correct drift accumulated mid-scan.
         """
-        self.logger.write_metadata()
+        self.logger.write_metadata(
+            {"oes_wavelength_calibration": self.oes_calibration}
+            if self.oes_calibration is not None else None
+        )
         self.logger.log_event(f"Scan started ({self.passes} pass"
                                f"{'es' if self.passes != 1 else ''}), "
                                f"output dir: {self.config['output']['base_dir']}")

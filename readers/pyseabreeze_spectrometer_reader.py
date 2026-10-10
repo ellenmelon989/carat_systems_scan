@@ -29,10 +29,12 @@ import numpy as np
 
 try:
     from .spectrometer_reader_base import SpectrometerReader, SpectrumReading, boxcar_smooth
+    from .wavelength_calibration import build_calibration
 except ImportError:
     # Fallback for running this file directly (e.g. python pyseabreeze_spectrometer_reader.py),
     # where relative imports don't work because there's no parent package.
     from spectrometer_reader_base import SpectrometerReader, SpectrumReading, boxcar_smooth
+    from wavelength_calibration import build_calibration
 
 
 _LIBUSB_DLL_DIRECTORY_HANDLE = None
@@ -143,7 +145,8 @@ def _install_adc1000_read_retry_workaround():
 
 class PySeabreezeSpectrometerReader(SpectrometerReader):
     def __init__(self, integration_time_us: int = 100_000, num_averages: int = 1,
-                 boxcar_width: int = 0, serial: Optional[str] = None):
+                 boxcar_width: int = 0, serial: Optional[str] = None,
+                 wavelength_calibration: Optional[dict] = None):
         self.integration_time_us = integration_time_us
         self.num_averages = num_averages
         self.boxcar_width = boxcar_width
@@ -151,6 +154,7 @@ class PySeabreezeSpectrometerReader(SpectrometerReader):
         self._wavelengths = None
         self._max_intensity = None
         self._init_error: Optional[str] = None
+        self.wavelength_calibration = None
 
         try:
             _prepare_windows_libusb_runtime()
@@ -161,7 +165,25 @@ class PySeabreezeSpectrometerReader(SpectrometerReader):
             self.spec = (Spectrometer.from_serial_number(serial) if serial
                          else Spectrometer.from_first_available())
             self.spec.integration_time_micros(self.integration_time_us)
-            self._wavelengths = self.spec.wavelengths()
+            # 2026-10-10: do NOT use self.spec.wavelengths() -- seabreeze
+            # always builds it from EEPROM slots 1-4, but the ADC1000-USB
+            # keeps its channel-0 coefficients in slots 2-5, which gave
+            # the 1 -> ~2,000,000 nm axis in the October scans. See
+            # readers/wavelength_calibration.py. Never raises for a bad
+            # calibration -- it's returned flagged (valid=False) so
+            # ScanManager can warn and record it with the scan.
+            cal_cfg = wavelength_calibration or {}
+            eeprom = getattr(getattr(self.spec, "_dev", None), "f", None)
+            eeprom = getattr(eeprom, "eeprom", None) if eeprom is not None else None
+            read_slot = (lambda k: eeprom.eeprom_read_slot(k)) if eeprom is not None else None
+            self.wavelength_calibration = build_calibration(
+                n_pixels=int(self.spec.pixels),
+                requested_source=cal_cfg.get("source", "auto"),
+                model=getattr(self.spec, "model", None),
+                read_slot=read_slot,
+                manual_coeffs=cal_cfg.get("coeffs"),
+            )
+            self._wavelengths = self.wavelength_calibration.wavelengths
             self._max_intensity = self.spec.max_intensity  # device-reported saturation
             # NOTE: seabreeze's own docs caveat that real saturation can occur
             # below this value -- treat it as an upper bound, not a guarantee.
@@ -274,6 +296,7 @@ if __name__ == "__main__":
         print(f"Error: {reading.error}")
     else:
         print(f"Connected to {reader.spec.model}, serial={reader.spec.serial_number}")
+        print(reader.wavelength_calibration.summary())
         print(f"Got {len(reading.wavelengths)} points, "
               f"saturated={reading.saturated}, "
               f"peak intensity={reading.intensities.max():.1f}")

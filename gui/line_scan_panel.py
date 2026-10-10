@@ -508,6 +508,9 @@ class LineScanPanel(ttk.Frame):
             self.running = False
             self._set_running(False)
             self._log("Scan aborted.")
+        elif kind == "warning":
+            self._log(f"WARNING: {payload}")
+            messagebox.showwarning("Line scan warning", payload)
         elif kind == "error":
             self.running = False
             self._set_running(False)

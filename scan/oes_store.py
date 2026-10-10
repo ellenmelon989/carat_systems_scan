@@ -214,6 +214,7 @@ class OESStore:
         self.path = path
         self.n_passes = int(n_passes)
         self._initialized = False
+        self._pending_attrs = {}
 
         if mode == "grid":
             if x_coords_mm is None or y_coords_mm is None:
@@ -313,11 +314,37 @@ class OESStore:
             f.create_dataset("oes_error", shape=shape,
                              dtype=bool, fillvalue=False)
 
+            for key, value in self._pending_attrs.items():
+                f.attrs[key] = value
+
         self._initialized = True
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
+
+    def write_attrs(self, attrs: dict) -> None:
+        """
+        Set root-level HDF5 attributes (provenance, e.g. the OES
+        wavelength calibration). dict/list values are stored as JSON
+        strings; read them back with json.loads(f.attrs[key]). If the
+        file isn't created yet (lazy init), they're applied when it is.
+        """
+        import json
+        encoded = {}
+        for key, value in attrs.items():
+            if isinstance(value, (dict, list, tuple)):
+                encoded[key] = json.dumps(value)
+            elif value is None:
+                encoded[key] = "null"
+            else:
+                encoded[key] = value
+        if not self._initialized:
+            self._pending_attrs.update(encoded)
+            return
+        with h5py.File(self.path, "a") as f:
+            for key, value in encoded.items():
+                f.attrs[key] = value
 
     def write_point(
         self,
