@@ -12,6 +12,11 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 
+# Prefix of ir_error_detail for a pyrometer-LOW point; the GUI status
+# panels match on it to show "LOW" instead of a generic read error.
+IR_LOW_PREFIX = "pyrometer LOW"
+
+
 @dataclass
 class IRReading:
     value_c: float
@@ -22,6 +27,15 @@ class IRReading:
     error: Optional[str] = None
     dilution: Optional[float] = None  # pyro signal dilution strength; None if
                                        # no dilution tag configured (ir.pac.dilution_tag_name)
+    # True when the value is the pyrometer's LOW output, not a temperature:
+    # below its minimum readable temperature / no usable signal (2026-10-06:
+    # the PAC reports LOW as a 300.0 C placeholder; the Williamson's real
+    # minimum is 600 C -- see ir.pac.min_valid_c). value_c is left as
+    # reported, NOT NaN: the adaptive scan's edge detector legitimately
+    # uses "reads low" as "off-wafer". Only read_averaged() (the precision
+    # scan's dwell average) excludes these, since a LOW is not a reading
+    # that can be averaged into a temperature.
+    below_range: bool = False
 
 
 class IRReader:
@@ -50,18 +64,33 @@ class IRReader:
         that want a different quality proxy (e.g. valid-vs-attempted read
         count) can add one later without touching this return shape again,
         since std alone was the smaller, cheaper addition to make first.
+
+        Bounded (2026-10-06): this loop used to run until it had min_reads
+        VALID reads with no deadline at all, so a point where every read
+        was invalid (PyroTempInvalid stuck on, PAC unreachable, pyrometer
+        LOW) hung the scan forever -- and Stop couldn't interrupt it.
+        Now: if the whole dwell window produced zero valid reads, return
+        NaN at t_end (waiting longer won't change a cold reactor); if it
+        produced some but fewer than min_reads, keep polling for at most
+        one extra dwell window (min 2 s), then return what it has.
+        below_range (LOW) readings are excluded like stale/errored ones.
         """
         valid_values = []
         last_reading = None
-        t_end = time.time() + averaging_time_s
+        t_start = time.time()
+        t_end = t_start + averaging_time_s
+        t_deadline = t_end + max(2.0, averaging_time_s)
 
-        while time.time() < t_end or len(valid_values) < min_reads:
+        while True:
             reading = self.read()
             last_reading = reading
-            if not reading.stale and reading.error is None:
+            if (not reading.stale and reading.error is None
+                    and not getattr(reading, "below_range", False)):
                 valid_values.append(reading.value_c)
-            if time.time() >= t_end and len(valid_values) >= min_reads:
-                break
+            now = time.time()
+            if now >= t_end:
+                if len(valid_values) >= min_reads or not valid_values or now >= t_deadline:
+                    break
             time.sleep(poll_interval_s)
 
         if valid_values:
@@ -122,6 +151,12 @@ def get_ir_reader(config) -> "IRReader":
             # skipped (IRReading.dilution stays None) until this is set,
             # rather than failing the whole IR read.
             dilution_tag_name=ir_cfg.get("dilution_tag_name") or None,
+            # Pyrometer LOW threshold. Defaulted in code (not just in
+            # config.example.yaml) because live config.yaml is per-machine
+            # and gitignored -- an existing on-site config must get the
+            # protection without anyone hand-editing it. Set to null in
+            # config.yaml to disable.
+            min_valid_c=ir_cfg.get("min_valid_c", 600.0),
         )
 
     if source not in (None, "mock"):

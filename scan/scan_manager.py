@@ -39,7 +39,7 @@ import logging
 import numpy as np
 
 from motion.motion_controller import get_motion_controller, AxisStateUnknown
-from readers.ir_reader_base import get_ir_reader
+from readers.ir_reader_base import IR_LOW_PREFIX, get_ir_reader
 from readers.spectrometer_reader_base import get_spectrometer_reader
 from scan.data_logger import DataLogger, build_point_record, resolve_run_dir
 from scan.oes_store import OESStore
@@ -987,25 +987,46 @@ class ScanManager:
             # HDF5 ir_skipped column) -- both still report NaN values, but
             # only a failure should look like a fault.
             return {"value": float("nan"), "emissivity": float("nan"), "dilution": None,
-                    "std": float("nan"), "error": False, "skipped": True}
+                    "std": float("nan"), "error": False, "skipped": True, "error_detail": ""}
 
         max_retries = self.error_cfg["max_retries"]
+        last_exc = None
         for attempt in range(max_retries + 1):
             try:
                 value, std, reading = self.ir_reader.read_averaged(self.dwell_time_s)
-                return {
-                    "value": value,
-                    "emissivity": reading.emissivity if reading is not None else float("nan"),
-                    "dilution": reading.dilution if reading is not None else None,
-                    "std": std,
-                    "error": False,
-                    "skipped": False,
-                }
             except Exception as e:
+                last_exc = e
                 self.logger.log_event(f"IR read failed (attempt {attempt + 1}): {e}")
+                continue
+            # 2026-10-06: a dwell window with no valid reads used to come
+            # back as value=NaN with error=False -- indistinguishable from
+            # a good point in the error flags. Mark it, and say why.
+            if value != value:  # NaN
+                if reading is not None and getattr(reading, "below_range", False):
+                    detail = (f"{IR_LOW_PREFIX} -- pyrometer reported "
+                              f"{reading.value_c:.1f} C (below its readable range / "
+                              "no usable signal)")
+                elif reading is not None and reading.error:
+                    detail = f"no valid IR reads in dwell window: {reading.error}"
+                else:
+                    detail = "no valid IR reads in dwell window"
+                self.logger.log_event(f"IR: {detail}")
+                return {"value": float("nan"), "emissivity": float("nan"), "dilution": None,
+                        "std": float("nan"), "error": True, "skipped": False,
+                        "error_detail": detail}
+            return {
+                "value": value,
+                "emissivity": reading.emissivity if reading is not None else float("nan"),
+                "dilution": reading.dilution if reading is not None else None,
+                "std": std,
+                "error": False,
+                "skipped": False,
+                "error_detail": "",
+            }
 
         return {"value": float("nan"), "emissivity": float("nan"), "dilution": None,
-                "std": float("nan"), "error": True, "skipped": False}
+                "std": float("nan"), "error": True, "skipped": False,
+                "error_detail": f"IR read raised: {last_exc}"}
 
     def _read_oes_with_retry(self):
         if not self.oes_enabled:

@@ -44,7 +44,8 @@ class RestApiIRReader(IRReader):
     def __init__(self, controller_ip: str, api_key_id: str, api_key_value: str,
                 temp_tag_name: str, emissivity_tag_name: str = "iai_PYRO_EMISSIVITY",
                 use_https: bool = False, verify_ssl: bool = False,
-                timeout: float = 2.0, dilution_tag_name: str = None):
+                timeout: float = 2.0, dilution_tag_name: str = None,
+                min_valid_c: float = 600.0):
         """
         temp_tag_name, emissivity_tag_name, dilution_tag_name are all REST
         strategy variable names (config: ir.pac.temp_tag_name /
@@ -65,6 +66,13 @@ class RestApiIRReader(IRReader):
         self.temp_tag_name = temp_tag_name
         self.emissivity_tag_name = emissivity_tag_name
         self.dilution_tag_name = dilution_tag_name
+        # Readings below this are the pyrometer's LOW output, not a
+        # temperature (config: ir.pac.min_valid_c; None disables). The PAC
+        # reports LOW as a 300.0 C placeholder; the Williamson's minimum
+        # readable temperature is 600 C (confirmed on-site 2026-10-06).
+        # Threshold rather than "== 300.0" so a changed placeholder value
+        # on the PAC side can't silently start passing as real data.
+        self.min_valid_c = min_valid_c
         self.verify_ssl  = verify_ssl
         self.timeout     = timeout
         self.session     = requests.Session()
@@ -93,8 +101,10 @@ class RestApiIRReader(IRReader):
             emis  = self._get_float(self.emissivity_tag_name)
             dilution = (self._get_float(self.dilution_tag_name)
                         if self.dilution_tag_name else None)
+            below = self.min_valid_c is not None and temp < self.min_valid_c
             return IRReading(value_c=temp, emissivity=emis, dilution=dilution,
-                            pac_timestamp=read_time, read_time=read_time, stale=False)
+                            pac_timestamp=read_time, read_time=read_time, stale=False,
+                            below_range=below)
         except requests.RequestException as e:
             return IRReading(value_c=float("nan"), emissivity=float("nan"),
                             pac_timestamp=None, read_time=read_time, stale=True,

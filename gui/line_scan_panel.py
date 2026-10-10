@@ -69,6 +69,8 @@ worker function needs no line-mode awareness at all.
 
 import copy
 import math
+
+from readers.ir_reader_base import IR_LOW_PREFIX
 import queue
 import threading
 import time
@@ -536,6 +538,8 @@ class LineScanPanel(ttk.Frame):
         ir_val = record.get("ir_temp_c")
         if record.get("ir_skipped"):
             ir_str = "disabled"
+        elif str(record.get("ir_error_detail", "")).startswith(IR_LOW_PREFIX):
+            ir_str = "LOW (below pyrometer range / no signal)"
         elif ir_val is None or (isinstance(ir_val, float) and math.isnan(ir_val)):
             ir_str = "NaN (read error)"
         else:

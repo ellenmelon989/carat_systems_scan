@@ -308,6 +308,9 @@ def build_point_record(point_id, x_mm, y_mm, ir_result, oes_result, feature_valu
         # oes_error, which mean the channel WAS attempted and failed.
         # Always present, same reasoning as ir_temp_std_c above.
         "ir_skipped": ir_result.get("skipped", False),
+        # Why ir_error is True ("" otherwise): pyrometer LOW, invalid flag,
+        # no response... Always present -- same column-alignment rule as above.
+        "ir_error_detail": ir_result.get("error_detail", ""),
         "oes_saturated": oes_result.get("saturated", False),
         "oes_error": oes_result.get("error", False),
         "oes_skipped": oes_result.get("skipped", False),

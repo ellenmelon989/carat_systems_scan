@@ -10,6 +10,8 @@ the worker thread, or ScanManager directly.
 """
 
 import math
+
+from readers.ir_reader_base import IR_LOW_PREFIX
 import tkinter as tk
 from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
@@ -68,6 +70,8 @@ class StatusPanel(ttk.Frame):
         ir_val = record.get("ir_temp_c")
         if record.get("ir_skipped"):
             ir_str = "disabled"
+        elif str(record.get("ir_error_detail", "")).startswith(IR_LOW_PREFIX):
+            ir_str = "LOW (below pyrometer range / no signal)"
         elif ir_val is None or (isinstance(ir_val, float) and math.isnan(ir_val)):
             ir_str = "NaN (read error)"
         else:

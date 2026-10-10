@@ -196,6 +196,14 @@ ir:
     ip: ""           # confirm on-site
     temp_tag_name: "iai_PYRO_TEMP"             # confirmed
     emissivity_tag_name: "iai_PYRO_EMISSIVITY" # confirmed
+    min_valid_c: 600.0      # pyrometer's minimum readable temperature (Williamson,
+                             # confirmed 2026-10-06). The PAC reports the pyrometer's
+                             # LOW / no-signal state as a 300.0 C placeholder; any
+                             # value below this is tagged LOW: excluded from the
+                             # precision scan's dwell average (point -> NaN,
+                             # ir_error True, ir_error_detail "pyrometer LOW ...").
+                             # Adaptive edge-following still sees the raw low value.
+                             # Defaults to 600 in code if absent; null disables.
     dilution_tag_name: ""    # pyro signal dilution strength — NOT confirmed yet
                               # (2026-07-21). TrendWater[4]/PyroValues[6] are PAC
                               # DISPLAY Float Table addresses, not REST strategy
