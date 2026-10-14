@@ -32,6 +32,7 @@ Sources (config.yaml -> oes.wavelength_calibration.source)
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Optional, Sequence
 
@@ -88,6 +89,71 @@ class WavelengthCalibration:
             "problems": list(self.problems),
             "warnings": list(self.warnings),
         }
+
+
+# --------------------------------------------------------------------------
+# EEPROM slot decoding (2026-10-14)
+#
+# Each slot read returns 17 bytes: [0x05, slot, 15 bytes of ASCII payload].
+# The payload is NUL-terminated only when shorter than 15 chars. seabreeze's
+# ADC1000 EEPROM feature handles a FULL 15-char payload by slicing to
+# len(ret) - 1, which drops the last character. On serial ADUD7590 slot 5
+# holds exactly 15 chars, "-1.3872010e-008", so the normal read returned
+# "-1.3872010e-00" == -1.387201 and the slots 2-5 axis came out invalid.
+# We read the raw 17-byte response ourselves and keep the whole payload.
+# --------------------------------------------------------------------------
+
+EEPROM_READ_OPCODE = 0x05
+EEPROM_PAYLOAD_LEN = 15
+
+
+def decode_eeprom_slot_response(raw, slot_number: int) -> str:
+    """Decode a raw EEPROM-slot response, keeping the complete payload."""
+    b = bytes(raw)
+    if len(b) < 3:
+        raise ValueError(f"EEPROM slot {slot_number}: short response ({len(b)} bytes)")
+    if b[0] != EEPROM_READ_OPCODE or b[1] != (slot_number % 0xFF):
+        raise ValueError(
+            f"EEPROM slot {slot_number}: unexpected response header {b[:2].hex()}")
+    payload = b[2:]
+    nul = payload.find(b"\x00")
+    if nul >= 0:
+        payload = payload[:nul]
+    return payload.decode("ascii", errors="replace").strip()
+
+
+def make_eeprom_slot_reader(eeprom) -> Callable[[int], str]:
+    """
+    Return read_slot(k) for a pyseabreeze EEPROM feature object, using the
+    raw 17-byte response so a full 15-char payload isn't truncated. Falls
+    back to eeprom.eeprom_read_slot (truncation-prone on ADC1000) only if
+    this seabreeze version doesn't expose the raw read; build_calibration's
+    truncation check still catches the ADUD7590 case in that path.
+    """
+    raw_fn = getattr(eeprom, "_func_eeprom_read_raw", None)
+    protocol = getattr(eeprom, "protocol", None)
+    if raw_fn is not None and protocol is not None:
+        def read_slot(k):
+            return decode_eeprom_slot_response(raw_fn(protocol, k), k)
+        read_slot.complete_payload = True
+    else:
+        def read_slot(k):
+            return eeprom.eeprom_read_slot(k)
+        read_slot.complete_payload = False
+    return read_slot
+
+
+# A coefficient whose text fills (or nearly fills) the 15-char slot and ends
+# in an exponent with < 3 digits has almost certainly lost its tail -- Ocean
+# writes 3-digit exponents ("e-008").
+_TRUNCATED_EXP = re.compile(r"[eE][+-]?\d{0,2}$")
+
+
+def looks_truncated(raw) -> bool:
+    if raw is None:
+        return False
+    t = str(raw).replace("\x00", "").strip()
+    return len(t) >= EEPROM_PAYLOAD_LEN - 1 and bool(_TRUNCATED_EXP.search(t))
 
 
 def resolve_source(requested: str, model: Optional[str]) -> str:
@@ -174,18 +240,20 @@ def build_calibration(
         coeffs = []
         problems = []
         for k in range(first, first + 4):
+            if looks_truncated(slots.get(k)):
+                problems.append(
+                    f"EEPROM slot {k} looks truncated ({slots.get(k)!r}): exponent "
+                    "cut off -- read the slot with make_eeprom_slot_reader()")
+                coeffs.append(float("nan"))
+                continue
             v = _parse_float(slots.get(k))
             if v is None:
                 problems.append(f"EEPROM slot {k} is not a number: {slots.get(k)!r}")
                 v = float("nan")
             coeffs.append(v)
-        # The cubic term is tiny (~1e-9..1e-8) and least likely to be
-        # stored correctly; a missing c3 still gives a usable axis, so
-        # warn instead of failing. Missing c0..c2 is a hard failure.
-        if np.isnan(coeffs[3]) and not any(np.isnan(coeffs[:3])):
-            warnings.append(f"slot {first + 3} (cubic term) unreadable; using c3=0")
-            coeffs[3] = 0.0
-            problems = [p for p in problems if f"slot {first + 3} " not in p]
+        # No fallback for a missing cubic term: on the ADC1000 c3 ~ -1.4e-8
+        # moves the red end of the axis by ~-119 nm, so c3=0 would put the
+        # lines in the wrong place while looking "valid" (2026-10-14).
         if problems:
             w = np.full(n_pixels, np.nan)
             return WavelengthCalibration(

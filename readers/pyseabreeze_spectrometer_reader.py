@@ -29,12 +29,12 @@ import numpy as np
 
 try:
     from .spectrometer_reader_base import SpectrometerReader, SpectrumReading, boxcar_smooth
-    from .wavelength_calibration import build_calibration
+    from .wavelength_calibration import build_calibration, make_eeprom_slot_reader
 except ImportError:
     # Fallback for running this file directly (e.g. python pyseabreeze_spectrometer_reader.py),
     # where relative imports don't work because there's no parent package.
     from spectrometer_reader_base import SpectrometerReader, SpectrumReading, boxcar_smooth
-    from wavelength_calibration import build_calibration
+    from wavelength_calibration import build_calibration, make_eeprom_slot_reader
 
 
 _LIBUSB_DLL_DIRECTORY_HANDLE = None
@@ -175,7 +175,9 @@ class PySeabreezeSpectrometerReader(SpectrometerReader):
             cal_cfg = wavelength_calibration or {}
             eeprom = getattr(getattr(self.spec, "_dev", None), "f", None)
             eeprom = getattr(eeprom, "eeprom", None) if eeprom is not None else None
-            read_slot = (lambda k: eeprom.eeprom_read_slot(k)) if eeprom is not None else None
+            # make_eeprom_slot_reader keeps the full 15-char payload (seabreeze's
+            # own ADC1000 read drops the last char of a full slot -- 2026-10-14).
+            read_slot = make_eeprom_slot_reader(eeprom) if eeprom is not None else None
             self.wavelength_calibration = build_calibration(
                 n_pixels=int(self.spec.pixels),
                 requested_source=cal_cfg.get("source", "auto"),

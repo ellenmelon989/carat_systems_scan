@@ -26,7 +26,10 @@ if _REPO_ROOT not in _sys.path:
 import numpy as np
 import yaml
 
-from readers.wavelength_calibration import build_calibration, evaluate, resolve_source
+from readers.wavelength_calibration import (
+    build_calibration, decode_eeprom_slot_response, evaluate, looks_truncated,
+    make_eeprom_slot_reader, resolve_source,
+)
 
 # Recovered from the 2026-10 scan data (slots 2-4); slot 5 (c3) is the
 # value that puts the one visible line on H-alpha -- representative only.
@@ -75,12 +78,12 @@ class SlotSelectionTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             resolve_source("slots_3_6", "ADC1000-USB")
 
-    def test_unreadable_cubic_term_warns_but_stays_valid(self):
+    def test_unreadable_cubic_term_is_invalid(self):
+        # c3 shifts the red end by ~-119 nm on this unit; never assume 0.
         eeprom = {**ADC_EEPROM, 5: "\x00\x00"}
         cal = build_calibration(2048, "auto", "ADC1000-USB", _reader(eeprom))
-        self.assertTrue(cal.valid, cal.problems)
-        self.assertEqual(cal.coeffs[3], 0.0)
-        self.assertTrue(cal.warnings)
+        self.assertFalse(cal.valid)
+        self.assertTrue(any("slot 5" in p for p in cal.problems), cal.problems)
 
     def test_garbage_slot_is_flagged_not_raised(self):
         eeprom = {**ADC_EEPROM, 3: "not a number"}
@@ -107,6 +110,83 @@ class SlotSelectionTests(unittest.TestCase):
                                 manual_coeffs=[800.0, -0.3, 0.0, 0.0])
         self.assertFalse(cal.valid)
         self.assertTrue(any("increasing" in p for p in cal.problems))
+
+
+# Serial ADUD7590, read on site 2026-10-14: slot 5 fills all 15 payload
+# bytes, so seabreeze's ADC1000 read dropped the final "8".
+ADUD7590_COEFFS = [201.5547, 0.3320928, 2.159012e-05, -1.387201e-08]
+
+
+def _raw_response(slot, text):
+    payload = text.encode("ascii")[:15]
+    return bytes([0x05, slot]) + payload + b"\x00" * (15 - len(payload))
+
+
+class _FakeEepromFeature:
+    """Mimics seabreeze's SeaBreezeEEPromFeatureADC, including its bug."""
+    def __init__(self, slots):
+        self.slots = slots
+        self.protocol = object()
+
+    @staticmethod
+    def _strip(raw):
+        try:
+            end = raw[2:].index(0) + 2
+        except ValueError:
+            end = len(raw) - 1                    # seabreeze's off-by-one
+        return raw[2:end].decode("utf-8")
+
+    def _func_eeprom_read_raw(self, protocol, slot):
+        assert protocol is self.protocol
+        return _raw_response(slot, self.slots[slot])
+
+    def eeprom_read_slot(self, slot, strip_zero_bytes=False):
+        return self._strip(self._func_eeprom_read_raw(self.protocol, slot))
+
+
+class EepromDecodeTests(unittest.TestCase):
+    SLOTS = {0: "ADUD7590", 1: "1", 2: "201.5547", 3: "0.3320928",
+             4: "2.159012e-005", 5: "-1.3872010e-008", 6: "0"}
+
+    def test_seabreeze_read_truncates_full_slot(self):
+        # Documents the upstream bug we work around.
+        feat = _FakeEepromFeature(self.SLOTS)
+        self.assertEqual(feat.eeprom_read_slot(5), "-1.3872010e-00")
+
+    def test_complete_decoder_keeps_full_payload(self):
+        raw = _raw_response(5, "-1.3872010e-008")
+        self.assertEqual(decode_eeprom_slot_response(raw, 5), "-1.3872010e-008")
+        self.assertEqual(decode_eeprom_slot_response(_raw_response(1, "1"), 1), "1")
+
+    def test_decoder_rejects_wrong_header(self):
+        with self.assertRaises(ValueError):
+            decode_eeprom_slot_response(_raw_response(4, "x"), 5)
+
+    def test_reader_gives_valid_axis_on_adud7590(self):
+        feat = _FakeEepromFeature(self.SLOTS)
+        read = make_eeprom_slot_reader(feat)
+        self.assertTrue(read.complete_payload)
+        for src in ("auto", "eeprom_slots_2_5"):
+            cal = build_calibration(2048, src, "ADC1000-USB", read)
+            self.assertTrue(cal.valid, cal.problems)
+            np.testing.assert_allclose(cal.coeffs, ADUD7590_COEFFS, rtol=1e-6)
+            lo, hi = cal.range_nm
+            self.assertAlmostEqual(lo, 201.6, places=1)
+            self.assertAlmostEqual(hi, 852.8, places=1)
+
+    def test_truncated_slot_is_flagged_by_name(self):
+        # Fallback path (no raw read available) must say *why* it's invalid.
+        feat = _FakeEepromFeature(self.SLOTS)
+        cal = build_calibration(2048, "auto", "ADC1000-USB", feat.eeprom_read_slot)
+        self.assertFalse(cal.valid)
+        self.assertTrue(any("slot 5 looks truncated" in p for p in cal.problems),
+                        cal.problems)
+
+    def test_looks_truncated(self):
+        self.assertTrue(looks_truncated("-1.3872010e-00"))
+        self.assertFalse(looks_truncated("-1.3872010e-008"))
+        self.assertFalse(looks_truncated("2.159012E-05"))   # short, not cut off
+        self.assertFalse(looks_truncated("201.5547"))
 
 
 class _FakeSpectrometer:
