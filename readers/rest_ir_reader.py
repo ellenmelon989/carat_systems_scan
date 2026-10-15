@@ -110,6 +110,14 @@ class RestApiIRReader(IRReader):
                             pac_timestamp=None, read_time=read_time, stale=True,
                             error=str(e))
 
+    def close(self):
+        """Release the HTTP session (Batch 1: scans close every reader)."""
+        try:
+            self.session.close()
+        except Exception:
+            pass
+
+
 if __name__ == "__main__":
     import yaml
     # utf-8-sig: see run_gui.py's copy of this comment -- tolerates/strips a

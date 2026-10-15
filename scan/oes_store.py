@@ -138,6 +138,8 @@ from __future__ import annotations
 
 import os
 import time
+
+TIMING_DATASETS = ("t_ir_start", "t_ir_end", "t_oes_start", "t_oes_end")
 from typing import Optional
 
 import h5py
@@ -297,6 +299,14 @@ class OESStore:
 
             f.create_dataset("intensity", shape=shape + (nl,),
                              dtype="float32", fillvalue=np.nan)
+            # Batch 1 (2026-10-14): unsmoothed frame average. `intensity`
+            # is the processed (boxcar-smoothed if boxcar_width > 0) copy.
+            f.create_dataset("intensity_raw", shape=shape + (nl,),
+                             dtype="float32", fillvalue=np.nan)
+            # Actual acquisition windows, Unix epoch s. `timestamp` is
+            # when the point was written (end of the point), kept as-is.
+            for name in TIMING_DATASETS:
+                f.create_dataset(name, shape=shape, dtype="float64", fillvalue=np.nan)
             f.create_dataset("ir_temp_c", shape=shape,
                              dtype="float32", fillvalue=np.nan)
             f.create_dataset("ir_emissivity", shape=shape,
@@ -361,6 +371,8 @@ class OESStore:
         saturated: bool = False,
         ir_error: bool = False,
         oes_error: bool = False,
+        raw_intensities: Optional[np.ndarray] = None,
+        timing: Optional[dict] = None,
     ) -> None:
         """
         Write one scan point to the HDF5 file.
@@ -426,6 +438,12 @@ class OESStore:
         with h5py.File(self.path, "a") as f:
             if intensities is not None:
                 f["intensity"][index + (slice(None),)] = intensities.astype("float32")
+            if raw_intensities is not None and "intensity_raw" in f:
+                f["intensity_raw"][index + (slice(None),)] = \
+                    np.asarray(raw_intensities).astype("float32")
+            for name, value in (timing or {}).items():
+                if name in TIMING_DATASETS and name in f and value is not None:
+                    f[name][index] = float(value)
             if ir_temp_c is not None:
                 f["ir_temp_c"][index] = float(ir_temp_c)
             if ir_emissivity is not None:
@@ -470,6 +488,17 @@ class OESStore:
         ir_temp_c gives the full time series across passes at one point.
         Line mode: `.sel(s_mm=..., method="nearest")` does the same.
         """
+        def _batch1_vars(f, dims):
+            # intensity_raw + acquisition-time datasets, added 2026-10-14;
+            # only present in files written after that.
+            out = {}
+            if "intensity_raw" in f:
+                out["intensity_raw"] = (dims + ["wavelength_nm"], f["intensity_raw"][:])
+            for name in TIMING_DATASETS:
+                if name in f:
+                    out[name] = (dims, f[name][:])
+            return out
+
         with h5py.File(path, "r") as f:
             is_line = "s_mm" in f
             shape = f["ir_temp_c"].shape
@@ -495,6 +524,7 @@ class OESStore:
                     "saturated": (dims, f["saturated"][:]),
                     "ir_error": (dims, f["ir_error"][:]),
                     "oes_error": (dims, f["oes_error"][:]),
+                    **_batch1_vars(f, dims),
                     "line_x_mm": (["s_mm"], f["line_x_mm"][:]),
                     "line_y_mm": (["s_mm"], f["line_y_mm"][:]),
                 }
@@ -520,6 +550,7 @@ class OESStore:
                     "saturated": (dims, f["saturated"][:]),
                     "ir_error": (dims, f["ir_error"][:]),
                     "oes_error": (dims, f["oes_error"][:]),
+                    **_batch1_vars(f, dims),
                 }
                 coords = {
                     "x_mm": f["x_mm"][:],

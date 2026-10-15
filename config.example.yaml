@@ -222,6 +222,12 @@ ir:
 
 oes:
   backend: mock        # mock | pyseabreeze
+  # Defaults for the Scan / Line Scan tabs' "OES acquisition" fields (editable
+  # per run; the values actually applied are recorded in metadata.yaml and
+  # oes.h5). integration_time_us: 3000-60000000. num_averages: 1-1000.
+  # boxcar_width is a HALF-width: w smooths over 2w+1 pixels, so 1 = 3-pixel
+  # average and only 0 = off. Smoothing applies to the processed `intensity`
+  # copy only; `intensity_raw` (unsmoothed) is always saved too.
   integration_time_us: 20000
   num_averages: 3
   boxcar_width: 2

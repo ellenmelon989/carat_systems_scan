@@ -23,6 +23,19 @@ class SpectrumReading:
     saturated: bool
     timestamp: float
     error: Optional[str] = None
+    # 2026-10-14 (Batch 1): `intensities` is the PROCESSED spectrum
+    # (frame-averaged, then boxcar-smoothed if boxcar_width > 0).
+    # `raw_intensities` is the same frame average BEFORE any smoothing --
+    # the detector values, kept so smoothing never destroys data. Equal
+    # to `intensities` when boxcar_width == 0.
+    raw_intensities: Optional[np.ndarray] = None
+    # Acquisition window (Unix epoch s): first frame started / last frame
+    # returned. `timestamp` == acq_start for backward compatibility.
+    acq_start: Optional[float] = None
+    acq_end: Optional[float] = None
+    # Brightest single-frame pixel before averaging -- saturation is judged
+    # on this, since averaging can pull one saturated frame below the limit.
+    max_frame_count: Optional[float] = None
 
 
 class SpectrometerReader:
@@ -62,6 +75,35 @@ class SpectrometerReader:
 
     def set_integration_time(self, integration_time_us: int):
         raise NotImplementedError
+
+    def apply_settings(self, integration_time_us: int, num_averages: int,
+                       boxcar_width: int):
+        """
+        Apply all three acquisition settings at once (Batch 1). Backends
+        that can return a stale frame after a settings change must
+        discard it on their next read() -- see PySeabreezeSpectrometerReader.
+        """
+        self.num_averages = int(num_averages)
+        self.boxcar_width = int(boxcar_width)
+        self.set_integration_time(int(integration_time_us))
+
+    def acquisition_record(self) -> dict:
+        """Settings actually applied to the device, for metadata/HDF5."""
+        max_i = getattr(self, "_max_intensity", None)
+        return {
+            "integration_time_us": int(getattr(self, "integration_time_us", 0)),
+            "num_averages": int(getattr(self, "num_averages", 1)),
+            "boxcar_width": int(getattr(self, "boxcar_width", 0)),
+            "boxcar_window_pixels": 2 * int(getattr(self, "boxcar_width", 0)) + 1,
+            "saturation_threshold_counts": float(max_i) if max_i is not None else None,
+            "discard_first_frame_after_settings_change": True,
+            "smoothing_applied_to": "intensity only; intensity_raw is unsmoothed",
+            "response_correction": "none (uncorrected detector counts)",
+            "dark_correction": "none",
+            "backend": type(self).__name__,
+            "model": getattr(getattr(self, "spec", None), "model", None),
+            "serial": getattr(getattr(self, "spec", None), "serial_number", None),
+        }
 
     def close(self):
         pass

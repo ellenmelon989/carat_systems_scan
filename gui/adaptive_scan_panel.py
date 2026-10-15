@@ -801,11 +801,31 @@ class AdaptiveScanPanel(ttk.Frame):
             if self.worker is not None:
                 self.worker.join(timeout=5)
 
+        self.release_connections()
+
+    def holds_connection(self) -> bool:
+        return any(getattr(self, a, None) is not None
+                   for a in ("motion", "ir_reader", "spectrometer"))
+
+    def release_connections(self):
+        """
+        Close motion, spectrometer AND IR reader (Batch 1, 2026-10-14 --
+        previously only motion was closed, leaving the spectrometer's USB
+        handle held). Safe to call when not connected. Re-enables Connect.
+        """
         self._stop_position_poll()
         self._unbind_arrows()
-
-        if self.motion is not None:
-            close = getattr(self.motion, "close", None)
+        for attr in ("motion", "spectrometer", "ir_reader"):
+            obj = getattr(self, attr, None)
+            close = getattr(obj, "close", None)
             if callable(close):
-                close()
-            self.motion = None
+                try:
+                    close()
+                except Exception:
+                    pass
+            setattr(self, attr, None)
+        try:
+            self._set_jog_enabled(False)
+            self.connect_btn.config(state="normal")
+        except Exception:
+            pass

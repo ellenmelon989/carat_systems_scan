@@ -35,6 +35,7 @@ from scan.scan_params import (
     estimate_scan_time_s,
 )
 from scan.scan_manager import solve_step_size_for_target_points
+from gui.oes_settings import OESSettingsFrame
 
 
 class ControlPanel(ttk.Frame):
@@ -131,6 +132,11 @@ class ControlPanel(ttk.Frame):
         ttk.Checkbutton(
             self, text="Enable OES (spectrometer)", variable=self.oes_enabled_var,
         ).grid(row=row, column=1, sticky="w")
+        row += 1
+
+        # Batch 1 (2026-10-14): OES acquisition settings, from config.yaml.
+        self.oes_settings = OESSettingsFrame(self, config)
+        self.oes_settings.grid(row=row, column=0, columnspan=3, sticky="we", pady=(6, 0))
         row += 1
 
         ttk.Label(self, text="Output dir").grid(row=row, column=0, sticky="w")
@@ -232,11 +238,13 @@ class ControlPanel(ttk.Frame):
             dwell = validate_dwell_time_s(self.dwell_var.get())
             step = validate_step_size_mm(self.step_var.get())
             passes = validate_passes(self.passes_var.get())
+            oes_values = self.oes_settings.values()
         except (ValueError, TypeError) as exc:
             messagebox.showerror("Invalid scan parameters", str(exc))
             return
 
         effective_config = copy.deepcopy(self.base_config)
+        effective_config["oes"].update(oes_values)
         effective_config["scan"]["dwell_time_s"] = dwell
         effective_config["scan"]["grid"]["step_size_mm"] = step
         effective_config["scan"]["passes"] = passes
@@ -309,6 +317,7 @@ class ControlPanel(ttk.Frame):
         self.outdir_var.set(self.base_config["output"].get("base_dir", "./scan_data"))
         self.ir_enabled_var.set(bool(self.base_config.get("ir", {}).get("enabled", True)))
         self.oes_enabled_var.set(bool(self.base_config.get("oes", {}).get("enabled", True)))
+        self.oes_settings.load_config(self.base_config)
 
         # PR2a: a fresh calibration hand-off changes what the full wafer
         # diameter even IS -- clear any diameter/point-count typed against

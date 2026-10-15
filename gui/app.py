@@ -151,23 +151,72 @@ class App(tk.Tk):
 
     def _take_shared_motion(self):
         """
-        One-shot hand-off accessor shared by start_scan() (below) and
-        LineScanPanel -- returns (self.motion, already_homed) and
-        consumes _pending_already_homed (reset to False) regardless of
-        outcome, exactly the inline logic start_scan() used before this
-        method existed. self.motion itself is NOT one-shot -- both the
-        Scan tab and the Line Scan tab keep reusing the same connection
-        across as many runs as the operator starts, only the
-        "already homed" claim is single-use.
+        Called by start_scan() and LineScanPanel right before a scan
+        starts. Returns (ok, motion, already_homed); ok=False means "don't
+        start" (the operator was told why).
+
+        Batch 1 (2026-10-14) -- COM7 "access denied" fixes:
+          1. If the Calibrate tab still holds the motion controller
+             (operator never clicked "Proceed to Scan"), it is released
+             here instead of the scan opening the port a second time:
+             a finished calibration is handed off (its results loaded
+             into the scan tabs; operator reviews and presses Start
+             again), an unfinished one is cancelled after confirmation.
+          2. If the Adaptive Scan tab is connected, it is disconnected
+             after confirmation (it holds motion AND the spectrometer).
+          3. OWNERSHIP of the shared motion connection now passes to the
+             scan: self.motion is cleared here, and the scan closes it,
+             together with the spectrometer and IR reader, when it
+             finishes (gui/scan_worker.py). The next scan opens a fresh
+             connection and homes normally.
+        already_homed is still one-shot.
         """
+        if self.calibration.holds_connection():
+            if self.calibration.finished_but_not_handed_off():
+                current_tab = self.notebook.select()
+                self.calibration.release_for_scan()   # -> _handle_calibrated()
+                self.notebook.select(current_tab)     # stay on the tab the operator used
+                messagebox.showinfo(
+                    "Calibration results loaded",
+                    "The calibration you just finished has been loaded into the "
+                    "scan tabs and its motion connection handed over.\n\n"
+                    "Check the scan settings, then press Start again.")
+                return False, None, False
+            if not messagebox.askyesno(
+                "Calibration in progress",
+                "The Calibrate tab is still connected to the motion controller.\n\n"
+                "Cancel the calibration and release the connection so the scan "
+                "can use it?"):
+                return False, None, False
+            self.calibration.release_for_scan()
+        if self.adaptive_scan.holds_connection():
+            if getattr(self.adaptive_scan, "running", False):
+                messagebox.showerror(
+                    "Adaptive scan running",
+                    "An adaptive scan is running. Stop it before starting this scan.")
+                return False, None, False
+            if not messagebox.askyesno(
+                "Adaptive Scan connected",
+                "The Adaptive Scan tab is connected to the motion controller and "
+                "spectrometer.\n\nDisconnect it so this scan can use them?"):
+                return False, None, False
+            self.adaptive_scan.release_connections()
+
         motion = self.motion
         already_homed = self._pending_already_homed
+        self.motion = None                 # ownership passes to the scan
         self._pending_already_homed = False
-        return motion, already_homed
+        return True, motion, already_homed
 
     def start_scan(self, effective_config):
         if self.running:
             return  # Start button is disabled while running, but guard anyway
+
+        # Resolve who holds the hardware BEFORE touching any UI state, so
+        # a declined/handed-off start leaves the tab exactly as it was.
+        ok, motion, already_homed = self._take_shared_motion()
+        if not ok:
+            return
 
         self.stop_event = threading.Event()  # fresh Event per run -- never reuse a fired one
 
@@ -196,8 +245,6 @@ class App(tk.Tk):
         # before this tab existed. already_homed is consumed here
         # (one-shot) regardless of whether the scan actually starts
         # successfully, so it can never apply to a later scan.
-        motion, already_homed = self._take_shared_motion()
-
         self.worker = threading.Thread(
             target=run_scan,
             args=(effective_config, self.q, self.stop_event),

@@ -277,6 +277,63 @@ def estimate_scan_time_s(nx: int, ny: int, dwell_time_s: float, settle_time_s: f
     return nx * ny * passes * (dwell_time_s + settle_time_s)
 
 
+# --------------------------------------------------------------------------
+# OES acquisition settings (Batch 1, 2026-10-14). Operator-editable on the
+# Scan and Line Scan tabs; defaults come from config.yaml's oes: block and
+# the values actually applied are recorded with every scan.
+#   integration: ADC1000/S2000-class benches accept ~3 ms .. 60 s.
+#   boxcar_width: HALF-width -- w smooths over (2w + 1) pixels, so 1 is a
+#   3-pixel average and only 0 means "no smoothing". Smoothing is applied
+#   to the processed `intensity` copy only; `intensity_raw` is never smoothed.
+# --------------------------------------------------------------------------
+INTEGRATION_TIME_MIN_US = 3_000
+INTEGRATION_TIME_MAX_US = 60_000_000
+NUM_AVERAGES_MIN = 1
+NUM_AVERAGES_MAX = 1000
+BOXCAR_WIDTH_MIN = 0
+BOXCAR_WIDTH_MAX = 50
+
+
+def _as_int(value, name):
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        raise ValueError(f"{name} must be a number, got {value!r}")
+    if f != int(f):
+        raise ValueError(f"{name} must be a whole number, got {value!r}")
+    return int(f)
+
+
+def validate_integration_time_us(value) -> int:
+    v = _as_int(value, "integration_time_us")
+    if not (INTEGRATION_TIME_MIN_US <= v <= INTEGRATION_TIME_MAX_US):
+        raise ValueError(
+            f"integration_time_us={v} outside valid range "
+            f"[{INTEGRATION_TIME_MIN_US}, {INTEGRATION_TIME_MAX_US}]")
+    return v
+
+
+def validate_num_averages(value) -> int:
+    v = _as_int(value, "num_averages")
+    if not (NUM_AVERAGES_MIN <= v <= NUM_AVERAGES_MAX):
+        raise ValueError(
+            f"num_averages={v} outside valid range [{NUM_AVERAGES_MIN}, {NUM_AVERAGES_MAX}]")
+    return v
+
+
+def validate_boxcar_width(value) -> int:
+    v = _as_int(value, "boxcar_width")
+    if not (BOXCAR_WIDTH_MIN <= v <= BOXCAR_WIDTH_MAX):
+        raise ValueError(
+            f"boxcar_width={v} outside valid range [{BOXCAR_WIDTH_MIN}, {BOXCAR_WIDTH_MAX}]")
+    return v
+
+
+def oes_acquisition_time_s(integration_time_us: int, num_averages: int) -> float:
+    """Time one OES read takes (+1 discarded frame only after a change)."""
+    return integration_time_us * 1e-6 * num_averages
+
+
 if __name__ == "__main__":
     # Smoke test
     assert grid_dims_from_range([0, 50], [0, 50], 2.0) == (26, 26)

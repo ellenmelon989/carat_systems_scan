@@ -49,10 +49,14 @@ from scan.scan_params import (
     STEP_SIZE_MAX_MM,
     grid_dims_from_range,
     in_radius,
+    validate_boxcar_width,
     validate_dwell_time_s,
+    validate_integration_time_us,
+    validate_num_averages,
     validate_passes,
     validate_points_within_limits,
 )
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -367,7 +371,7 @@ def extract_features(wavelengths, intensities, features_cfg, window_nm):
 
 
 class ScanManager:
-    def __init__(self, config, motion=None):
+    def __init__(self, config, motion=None, owns_motion=False):
         """
         motion: optional, pre-constructed MotionController. Defaults to
         None, which builds a fresh one via get_motion_controller(config)
@@ -382,8 +386,18 @@ class ScanManager:
         what makes it safe to also pass already_homed=True to run():
         there's no re-derived cross-process trust involved, it's
         literally the same in-memory controller that was just homed.
+
+        owns_motion (Batch 1, 2026-10-14): True when the caller hands
+        OWNERSHIP of a passed-in `motion` to this ScanManager -- it is then
+        closed by close() at the end of the scan like one we opened
+        ourselves. The GUI always does this (gui/app.py), so no connection
+        outlives the scan that used it. Ignored when motion is None.
         """
         self.config = config
+        self.ir_reader = None
+        self.spectrometer = None
+        self.motion = None
+        self._closed = False
         self.scan_cfg = config["scan"]
         self.oes_cfg = config["oes"]
         self.error_cfg = config["error_policy"]
@@ -424,6 +438,15 @@ class ScanManager:
         # burning real homing time.
         preflight_check(config)
 
+        # Batch 1: validate OES acquisition settings before touching
+        # hardware, so a bad value from the GUI fails immediately.
+        self.oes_settings = {
+            "integration_time_us": validate_integration_time_us(
+                self.oes_cfg.get("integration_time_us", 20000)),
+            "num_averages": validate_num_averages(self.oes_cfg.get("num_averages", 1)),
+            "boxcar_width": validate_boxcar_width(self.oes_cfg.get("boxcar_width", 0)),
+        }
+
         # _owns_motion tracks whether THIS __init__ opened the connection
         # (motion=None -> get_motion_controller() below) vs. received an
         # already-connected one from a caller (e.g. the Calibrate tab
@@ -431,7 +454,7 @@ class ScanManager:
         # gets closed on the error path right below -- closing a
         # caller-owned, handed-off motion object here would pull the rug
         # out from under that caller's own cleanup expectations.
-        self._owns_motion = motion is None
+        self._owns_motion = motion is None or bool(owns_motion)
         self.motion = motion if motion is not None else get_motion_controller(config)
         try:
             self.ir_reader = get_ir_reader(config)
@@ -471,30 +494,22 @@ class ScanManager:
                     "run tools/dump_spectrometer_eeprom.py."
                 )
         except Exception:
-            # Without this, a config error here (e.g. a missing
-            # ir.pac.temp_tag_name key) leaves the just-opened 8742/motion
-            # connection dangling: ScanManager.__init__ raises, run_scan()
-            # reports "Failed to initialize scan hardware" and returns, but
-            # nothing ever calls self.motion.close(). The controller object
-            # is only released whenever Python happens to garbage-collect
-            # it, and if the hardware only allows one live connection (true
-            # of the 8742 over USB/Ethernet), every later connection
-            # attempt -- including an independent one from the Adaptive
-            # Scan tab -- fails until then, usually surfacing as a
-            # confusing secondary "Error closing 8742 connection: ...
-            # object has no attribute '_stage'" instead of pointing at the
-            # real cause. Close what we opened, then let the original
-            # exception propagate unchanged.
-            if self._owns_motion:
-                try:
-                    self.motion.close()
-                except Exception as close_exc:
-                    logger.warning(
-                        "Also failed to close the motion connection while "
-                        "cleaning up after a failed ScanManager init: %s",
-                        close_exc,
-                    )
+            # Close everything opened so far (motion only if we own it,
+            # plus any reader already constructed) -- a half-initialized
+            # ScanManager must never leave a port/USB handle held. See
+            # close(). The original exception propagates unchanged.
+            self.close()
             raise
+
+        try:
+            self._init_storage(config)
+        except Exception:
+            self.close()
+            raise
+
+    def _init_storage(self, config):
+        """Output dir, OESStore and DataLogger (split out of __init__ so a
+        failure here also releases the hardware -- Batch 1)."""
 
         # Stamp output.base_dir with this run's date/time BEFORE it's used
         # for anything below (the default oes.h5 path and DataLogger's
@@ -592,6 +607,40 @@ class ScanManager:
         if self.calibration_warning:
             self.logger.log_event(f"WARNING: {self.calibration_warning}")
 
+    def close(self):
+        """
+        Release every hardware connection this scan holds (Batch 1,
+        2026-10-14): spectrometer, IR reader, and the motion controller if
+        this ScanManager owns it. Idempotent and never raises -- called
+        from __init__'s failure paths and from gui/scan_worker.py's
+        finally, so it runs after completed, aborted, faulted AND crashed
+        scans. Previously only the init-failure path closed motion, and
+        nothing ever closed the spectrometer or IR reader, which left
+        COM/USB handles held for the next scan or calibration.
+        """
+        if getattr(self, "_closed", False):
+            return
+        self._closed = True
+        targets = [("spectrometer", self.spectrometer), ("IR reader", self.ir_reader)]
+        if getattr(self, "_owns_motion", False):
+            targets.append(("motion controller", self.motion))
+        for label, obj in targets:
+            close = getattr(obj, "close", None)
+            if not callable(close):
+                continue
+            try:
+                close()
+            except Exception as exc:
+                logger.warning("Failed to close %s: %s", label, exc)
+        if getattr(self, "logger", None) is not None:
+            try:
+                self.logger.log_event(
+                    "Closed hardware connections: spectrometer, IR reader"
+                    + (", motion controller" if self._owns_motion else
+                       " (motion controller left open: owned by caller)"))
+            except Exception:
+                pass
+
     def _safe_rehome(self, context: str):
         """
         Call motion.home() only when it's actually safe to; otherwise
@@ -681,10 +730,33 @@ class ScanManager:
         unaffected by this flag — those still run normally regardless,
         since they exist to correct drift accumulated mid-scan.
         """
-        self.logger.write_metadata(
-            {"oes_wavelength_calibration": self.oes_calibration}
-            if self.oes_calibration is not None else None
-        )
+        # Batch 1: apply the operator's OES acquisition settings to the
+        # device and record what was actually applied (metadata.yaml +
+        # oes.h5 attrs). The reader discards the first frame after this.
+        apply = getattr(self.spectrometer, "apply_settings", None)
+        if callable(apply):
+            apply(**self.oes_settings)
+        else:  # minimal/legacy reader objects (tests, unimplemented backends)
+            self.spectrometer.set_integration_time(self.oes_settings["integration_time_us"])
+        record = getattr(self.spectrometer, "acquisition_record", None)
+        self.oes_acquisition = record() if callable(record) else dict(self.oes_settings)
+        self.oes_acquisition["oes_enabled"] = self.oes_enabled
+        self.store.write_attrs({"oes_acquisition": self.oes_acquisition,
+                                "dwell_time_s": self.dwell_time_s})
+        extra = {"oes_acquisition": self.oes_acquisition,
+                 "dwell": {
+                     "dwell_time_s": self.dwell_time_s,
+                     "meaning": "minimum time spent measuring at each point, "
+                                "whether or not IR is enabled; IR averages over "
+                                "it, OES is read after it when IR is on"}}
+        if self.oes_calibration is not None:
+            extra["oes_wavelength_calibration"] = self.oes_calibration
+        self.logger.write_metadata(extra)
+        s_ = self.oes_settings
+        self.logger.log_event(
+            f"OES acquisition: integration {s_['integration_time_us']} us x "
+            f"{s_['num_averages']} averages, boxcar half-width {s_['boxcar_width']} "
+            f"(raw unsmoothed spectra saved as intensity_raw); dwell {self.dwell_time_s} s")
         self.logger.log_event(f"Scan started ({self.passes} pass"
                                f"{'es' if self.passes != 1 else ''}), "
                                f"output dir: {self.config['output']['base_dir']}")
@@ -698,7 +770,6 @@ class ScanManager:
             )
         else:
             self._safe_rehome("scan start")
-        self.spectrometer.set_integration_time(self.oes_cfg["integration_time_us"])
 
         # PR2b (2026-09-08): normalize both modes to the same
         # (ix, iy, x, y, s_mm) shape so the rest of run() below (rehome/
@@ -865,9 +936,28 @@ class ScanManager:
 
         motion_ok, motion_error_detail = self._move_with_retry(x, y)
 
+        nan = float("nan")
+        timing = {"t_ir_start": nan, "t_ir_end": nan, "t_oes_start": nan, "t_oes_end": nan}
+        raw_intensities = None
         if motion_ok:
+            # Batch 1: the dwell is enforced HERE, independent of which
+            # channels are enabled. Previously the only per-point wait was
+            # inside the pyrometer's read_averaged(dwell), so an OES-only
+            # scan moved on after just settle_time_s.
+            t_point = time.time()
+            if self.ir_enabled:
+                timing["t_ir_start"] = time.time()
             ir_result = self._read_ir_with_retry()
-            oes_result, wavelengths, intensities = self._read_oes_with_retry()
+            if self.ir_enabled:
+                timing["t_ir_end"] = time.time()
+            oes_result, wavelengths, intensities, reading = self._read_oes_with_retry()
+            if reading is not None:
+                raw_intensities = reading.raw_intensities
+                timing["t_oes_start"] = reading.acq_start if reading.acq_start else reading.timestamp
+                timing["t_oes_end"] = reading.acq_end if reading.acq_end else time.time()
+            remaining = self.dwell_time_s - (time.time() - t_point)
+            if remaining > 0:
+                time.sleep(remaining)
         else:
             # Position is unknown/unreliable after a failed move (axis
             # timeout, stall, comm fault) — don't trust an IR/OES reading
@@ -897,6 +987,10 @@ class ScanManager:
         # on later (faulted) rows would silently misalign every column after
         # it. Empty string on success keeps every row's schema identical.
         record["motion_error_detail"] = motion_error_detail or ""
+        # Actual acquisition windows (Unix epoch s); NaN when that channel
+        # was skipped/failed. Always present so every CSV row has the same
+        # columns. `timestamp` above is when the record was written.
+        record.update(timing)
 
         # Pass ix/iy so DataLogger can forward them to OESStore. Reference
         # points have ix=iy=None regardless of mode — DataLogger skips the
@@ -913,6 +1007,7 @@ class ScanManager:
             intensities=intensities,
             ix=ix,
             iy=iy,
+            raw_intensities=raw_intensities,
         )
 
         if on_point is not None:
@@ -1074,7 +1169,7 @@ class ScanManager:
             # _measure_point() already falls back to all-NaN whenever
             # intensities is None (the existing "read failed" path), so
             # no separate handling is needed there for the skipped case.
-            return {"saturated": False, "error": False, "skipped": True}, None, None
+            return {"saturated": False, "error": False, "skipped": True}, None, None, None
 
         max_retries = self.error_cfg["max_retries"]
         for attempt in range(max_retries + 1):
@@ -1083,11 +1178,11 @@ class ScanManager:
                 if reading.error:
                     raise IOError(reading.error)
                 return ({"saturated": reading.saturated, "error": False, "skipped": False},
-                        reading.wavelengths, reading.intensities)
+                        reading.wavelengths, reading.intensities, reading)
             except Exception as e:
                 self.logger.log_event(f"OES read failed (attempt {attempt + 1}): {e}")
 
-        return {"saturated": False, "error": True, "skipped": False}, None, None
+        return {"saturated": False, "error": True, "skipped": False}, None, None, None
 
 
 if __name__ == "__main__":
@@ -1169,4 +1264,7 @@ if __name__ == "__main__":
         sys.exit(0)
 
     manager = ScanManager(config)
-    manager.run()
+    try:
+        manager.run()
+    finally:
+        manager.close()

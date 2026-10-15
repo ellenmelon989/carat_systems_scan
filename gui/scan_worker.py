@@ -63,11 +63,30 @@ def run_scan(config, q, stop_event, motion=None, already_homed=False):
     GUI would sit there looking like the scan is still running with no
     indication anything went wrong.
     """
+    # Batch 1 (2026-10-14): the GUI hands OWNERSHIP of `motion` to this
+    # scan (app.py clears its own reference), so ScanManager closes it
+    # with the spectrometer and IR reader when the scan ends -- see the
+    # finally below. A failed init closes whatever it had opened itself.
     try:
-        manager = ScanManager(config, motion=motion)
+        manager = ScanManager(config, motion=motion, owns_motion=True)
     except Exception as exc:
+        if motion is not None:
+            close = getattr(motion, "close", None)
+            if callable(close):
+                try:
+                    close()
+                except Exception:
+                    pass
         q.put(("error", _format_error("Failed to initialize scan hardware", exc)))
         return
+
+    try:
+        _run_and_report(manager, q, stop_event, already_homed)
+    finally:
+        manager.close()
+
+
+def _run_and_report(manager, q, stop_event, already_homed):
 
     # Non-fatal problems the operator must see before trusting the data
     # (2026-10-10: an invalid OES wavelength calibration). The scan keeps

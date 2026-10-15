@@ -91,6 +91,7 @@ from scan.scan_params import (
 )
 from scan.live_map_accumulator import LineAccumulator
 from gui.scan_worker import run_scan
+from gui.oes_settings import OESSettingsFrame
 
 POLL_INTERVAL_MS = 150
 
@@ -204,6 +205,11 @@ class LineScanPanel(ttk.Frame):
         ).grid(row=row, column=1, sticky="w")
         row += 1
 
+        # Batch 1 (2026-10-14): OES acquisition settings, from config.yaml.
+        self.oes_settings = OESSettingsFrame(frame, self.base_config)
+        self.oes_settings.grid(row=row, column=0, columnspan=3, sticky="we", pady=(6, 0))
+        row += 1
+
         ttk.Label(frame, text="Output dir").grid(row=row, column=0, sticky="w")
         ttk.Entry(frame, textvariable=self.outdir_var, width=30).grid(
             row=row, column=1, columnspan=2, sticky="we")
@@ -287,6 +293,7 @@ class LineScanPanel(ttk.Frame):
         self.outdir_var.set(self.base_config["output"].get("base_dir", "./scan_data"))
         self.ir_enabled_var.set(bool(self.base_config.get("ir", {}).get("enabled", True)))
         self.oes_enabled_var.set(bool(self.base_config.get("oes", {}).get("enabled", True)))
+        self.oes_settings.load_config(self.base_config)
 
         center_mm, _ = self._calibrated_center_and_radius()
         if center_mm is not None:
@@ -405,11 +412,13 @@ class LineScanPanel(ttk.Frame):
         try:
             dwell = validate_dwell_time_s(self.dwell_var.get())
             passes = validate_passes(self.passes_var.get())
+            oes_values = self.oes_settings.values()
         except (ValueError, TypeError) as exc:
             messagebox.showerror("Invalid scan parameters", str(exc))
             return
 
         effective_config = copy.deepcopy(self.base_config)
+        effective_config["oes"].update(oes_values)
         effective_config["scan"]["dwell_time_s"] = dwell
         effective_config["scan"]["passes"] = passes
         effective_config["output"]["base_dir"] = self.outdir_var.get()
@@ -435,7 +444,11 @@ class LineScanPanel(ttk.Frame):
         # Scan does. already_homed is one-shot, consumed by app.py's
         # take_shared_motion() regardless of whether this scan actually
         # starts successfully.
-        motion, already_homed = self.take_shared_motion()
+        # Batch 1: may free the Calibrate tab's connection first, or
+        # decline to start (ok=False) after telling the operator why.
+        ok, motion, already_homed = self.take_shared_motion()
+        if not ok:
+            return
 
         self.stop_event = threading.Event()
         self.q = queue.Queue()

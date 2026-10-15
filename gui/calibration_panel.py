@@ -806,6 +806,30 @@ class CalibrationPanel(ttk.Frame):
         self._set_jog_enabled(False)
         self.on_calibrated(config, motion, True)
 
+    def holds_connection(self) -> bool:
+        return self.motion is not None
+
+    def finished_but_not_handed_off(self) -> bool:
+        return self.step == "done" and self.motion is not None
+
+    def release_for_scan(self):
+        """
+        Batch 1 (2026-10-14): a scan is starting while this tab still holds
+        the motion controller (COM port). If calibration finished, hand it
+        off exactly as "Proceed to Scan" would. Otherwise cancel the
+        in-progress calibration and close the connection. Called only by
+        app.py, after the operator has confirmed.
+        """
+        if self.finished_but_not_handed_off():
+            self._proceed_to_scan()
+            return
+        self._set_jog_enabled(False)
+        self._stop_position_poll()
+        self._close_motion()
+        self._reset_state()
+        self._log("Calibration cancelled to free the motion controller for a scan.")
+        self._render_idle()
+
     def _recalibrate(self):
         self._close_motion()
         self._reset_state()

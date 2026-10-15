@@ -187,7 +187,8 @@ class DataLogger:
             yaml.safe_dump(metadata, f, default_flow_style=False)
 
     def write_point(self, point_record, wavelengths=None, intensities=None,
-                    ix: Optional[int] = None, iy: Optional[int] = None):
+                    ix: Optional[int] = None, iy: Optional[int] = None,
+                    raw_intensities=None):
         """
         Append one point's summary row to the CSV, write its spectrum
         to a per-point CSV file, and (if an OESStore is attached) write
@@ -204,7 +205,8 @@ class DataLogger:
         self._append_summary_row(point_record)
 
         if wavelengths is not None and intensities is not None:
-            self._write_spectrum(point_record["point_id"], wavelengths, intensities)
+            self._write_spectrum(point_record["point_id"], wavelengths, intensities,
+                                 raw_intensities)
 
         # HDF5 write — only if a store is wired up and this is a real
         # spatial point, not a reference-point revisit.
@@ -234,6 +236,9 @@ class DataLogger:
                 saturated=bool(point_record.get("oes_saturated", False)),
                 ir_error=bool(point_record.get("ir_error", False)),
                 oes_error=bool(point_record.get("oes_error", False)),
+                raw_intensities=raw_intensities,
+                timing={k: point_record.get(k) for k in
+                        ("t_ir_start", "t_ir_end", "t_oes_start", "t_oes_end")},
             )
 
     def _append_summary_row(self, point_record):
@@ -249,14 +254,18 @@ class DataLogger:
 
         self._summary_initialized = True
 
-    def _write_spectrum(self, point_id, wavelengths, intensities):
+    def _write_spectrum(self, point_id, wavelengths, intensities, raw_intensities=None):
+        # Columns: wavelength_nm, intensity (processed: boxcar-smoothed if
+        # boxcar_width > 0), intensity_raw (unsmoothed frame average --
+        # Batch 1, 2026-10-14; identical to intensity when boxcar is off).
         filename = os.path.join(self.spectra_dir, f"point_{point_id:05d}.csv")
+        if raw_intensities is None:
+            raw_intensities = intensities
         with open(filename, "w", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow(["wavelength_nm", "intensity"])
-            for wl, intens in zip(wavelengths, intensities):
-                writer.writerow([wl, intens])
-
+            writer.writerow(["wavelength_nm", "intensity", "intensity_raw"])
+            for wl, intens, raw in zip(wavelengths, intensities, raw_intensities):
+                writer.writerow([wl, intens, raw])
 
 def build_point_record(point_id, x_mm, y_mm, ir_result, oes_result, feature_values,
                         pass_id=0, s_mm=None):

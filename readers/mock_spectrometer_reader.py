@@ -37,28 +37,31 @@ class MockSpectrometerReader(SpectrometerReader):
         self.integration_time_us = integration_time_us
 
     def read(self) -> SpectrumReading:
-        timestamp = time.time()
-        baseline = np.random.normal(200, self._noise_level, size=self._wavelengths.shape)
-        spectrum = baseline.copy()
-        for center, height, width in self._peaks:
-            spectrum += height * np.exp(-0.5 * ((self._wavelengths - center) / width) ** 2)
-        spectrum = np.clip(spectrum, 0, self._max_intensity)
-
-        if self.boxcar_width > 0:
-            spectrum = boxcar_smooth(spectrum, self.boxcar_width)
-
-        saturated = bool(np.max(spectrum) >= self._max_intensity)
-
+        acq_start = time.time()
+        accum = None
+        frame_max = -np.inf
+        for _ in range(max(1, int(self.num_averages))):
+            frame = np.random.normal(200, self._noise_level, size=self._wavelengths.shape)
+            for center, height, width in self._peaks:
+                frame += height * np.exp(-0.5 * ((self._wavelengths - center) / width) ** 2)
+            frame = np.clip(frame, 0, self._max_intensity)
+            frame_max = max(frame_max, float(np.max(frame)))
+            accum = frame if accum is None else accum + frame
+        raw = accum / max(1, int(self.num_averages))
+        processed = boxcar_smooth(raw, self.boxcar_width) if self.boxcar_width > 0 else raw
         return SpectrumReading(
             wavelengths=self._wavelengths,
-            intensities=spectrum,
+            intensities=processed,
             integration_time_us=self.integration_time_us,
             num_averages=self.num_averages,
             boxcar_width=self.boxcar_width,
-            saturated=saturated,
-            timestamp=timestamp,
+            saturated=bool(frame_max >= self._max_intensity),
+            timestamp=acq_start,
+            raw_intensities=raw,
+            acq_start=acq_start,
+            acq_end=time.time(),
+            max_frame_count=frame_max,
         )
-
 
 if __name__ == "__main__":
     reader = MockSpectrometerReader()

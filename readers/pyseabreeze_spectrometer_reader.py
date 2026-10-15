@@ -155,6 +155,10 @@ class PySeabreezeSpectrometerReader(SpectrometerReader):
         self._max_intensity = None
         self._init_error: Optional[str] = None
         self.wavelength_calibration = None
+        # The first frame after connecting or changing the integration time
+        # was exposed under the OLD setting (seen as point 0 of the October
+        # scans) -- read() throws one frame away while this is set.
+        self._discard_next = True
 
         try:
             _prepare_windows_libusb_runtime()
@@ -196,6 +200,7 @@ class PySeabreezeSpectrometerReader(SpectrometerReader):
         self.integration_time_us = integration_time_us
         if self.spec:
             self.spec.integration_time_micros(integration_time_us)
+        self._discard_next = True
 
     def read(self) -> SpectrumReading:
         timestamp = time.time()
@@ -207,25 +212,34 @@ class PySeabreezeSpectrometerReader(SpectrometerReader):
                 saturated=False, timestamp=timestamp, error=self._init_error,
             )
         try:
+            if self._discard_next:
+                self.spec.intensities()          # stale frame -- discard
+                self._discard_next = False
+            acq_start = time.time()
             accum = None
-            for _ in range(self.num_averages):
-                intensities = self.spec.intensities()
-                accum = intensities.copy() if accum is None else accum + intensities
-            intensities = accum / self.num_averages
-
-            if self.boxcar_width > 0:
-                intensities = boxcar_smooth(intensities, self.boxcar_width)
-
-            saturated = bool(np.max(intensities) >= self._max_intensity)
+            frame_max = -np.inf
+            for _ in range(max(1, int(self.num_averages))):
+                frame = np.asarray(self.spec.intensities(), dtype=np.float64)
+                frame_max = max(frame_max, float(np.max(frame)))
+                accum = frame.copy() if accum is None else accum + frame
+            acq_end = time.time()
+            raw = accum / max(1, int(self.num_averages))
+            processed = (boxcar_smooth(raw, self.boxcar_width)
+                         if self.boxcar_width > 0 else raw)
+            saturated = bool(frame_max >= self._max_intensity)
 
             return SpectrumReading(
                 wavelengths=self._wavelengths,
-                intensities=intensities,
+                intensities=processed,
                 integration_time_us=self.integration_time_us,
                 num_averages=self.num_averages,
                 boxcar_width=self.boxcar_width,
                 saturated=saturated,
-                timestamp=timestamp,
+                timestamp=acq_start,
+                raw_intensities=raw,
+                acq_start=acq_start,
+                acq_end=acq_end,
+                max_frame_count=frame_max,
             )
         except Exception as e:
             return SpectrumReading(

@@ -142,11 +142,16 @@ def fix_scan_dir(scan_dir, coeffs, force=False, maps=False, dry_run=False):
             if len(w) != n:
                 print(f"  SKIP {os.path.basename(p)}: {len(w)} rows, expected {n}")
                 continue
+            # Keep every column after wavelength_nm (intensity, and
+            # intensity_raw in files written after 2026-10-14) untouched.
+            with open(p, newline="") as f:
+                rows = list(csv.reader(f))
+            header, body = rows[0], rows[1:]
             with open(p, "w", newline="") as f:
                 wr = csv.writer(f)
-                wr.writerow(["wavelength_nm", "intensity"])
-                for wl, it in zip(new_w, inten):
-                    wr.writerow([wl, it])
+                wr.writerow(header)
+                for wl, row in zip(new_w, body):
+                    wr.writerow([wl] + row[1:])
         print(f"  rewrote {len(spectra)} spectrum CSVs")
 
     # 2. HDF5
