@@ -9,3 +9,6 @@ venv/
 switchover_results/
 config.backup_before_mr1530_*.yaml
 config.trial_mr1530_*.yaml
+
+# OES background captures (instrument data, not code)
+backgrounds/

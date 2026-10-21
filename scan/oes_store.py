@@ -140,6 +140,7 @@ import os
 import time
 
 TIMING_DATASETS = ("t_ir_start", "t_ir_end", "t_oes_start", "t_oes_end")
+BGSUB_DATASETS = ("intensity_bgsub", "intensity_raw_bgsub")
 from typing import Optional
 
 import h5py
@@ -170,7 +171,7 @@ class OESStore:
     def __init__(self, path: str, x_coords_mm=None, y_coords_mm=None, n_passes: int = 1,
                  wavelengths=None, mode: str = "grid",
                  s_coords_mm=None, line_x_mm=None, line_y_mm=None,
-                 start_mm=None, end_mm=None):
+                 start_mm=None, end_mm=None, background=None):
         """
         Parameters
         ----------
@@ -254,6 +255,13 @@ class OESStore:
                 "first, or move/rename the existing file now."
             )
 
+        # Batch 2 (2026-10-19): scan.background.Background selected for
+        # this scan, or None. When set, the file also gets the subtracted
+        # spectra (intensity_bgsub, intensity_raw_bgsub) and a copy of the
+        # background itself (/background/...), so the subtraction can be
+        # checked or redone from this one file.
+        self.background = background
+
         if wavelengths is not None:
             self._initialize(np.asarray(wavelengths))
 
@@ -307,6 +315,21 @@ class OESStore:
             # when the point was written (end of the point), kept as-is.
             for name in TIMING_DATASETS:
                 f.create_dataset(name, shape=shape, dtype="float64", fillvalue=np.nan)
+            bg = getattr(self, "background", None)
+            if bg is not None and nl > 0:
+                # intensity / intensity_raw stay UNSUBTRACTED; these are
+                # the background-subtracted copies (raw - background mean,
+                # and that smoothed like `intensity`).
+                for name in BGSUB_DATASETS:
+                    f.create_dataset(name, shape=shape + (nl,),
+                                     dtype="float32", fillvalue=np.nan)
+                g = f.create_group("background")
+                g.create_dataset("mean", data=np.asarray(bg.mean, dtype="float64"))
+                g.create_dataset("std", data=np.asarray(bg.std, dtype="float64"))
+                g.create_dataset("wavelength_nm_at_capture",
+                                 data=np.asarray(bg.wavelengths, dtype="float64"))
+                import json as _json
+                g.attrs["record"] = _json.dumps(bg.record)
             f.create_dataset("ir_temp_c", shape=shape,
                              dtype="float32", fillvalue=np.nan)
             f.create_dataset("ir_emissivity", shape=shape,
@@ -373,6 +396,7 @@ class OESStore:
         oes_error: bool = False,
         raw_intensities: Optional[np.ndarray] = None,
         timing: Optional[dict] = None,
+        bgsub: Optional[dict] = None,
     ) -> None:
         """
         Write one scan point to the HDF5 file.
@@ -441,6 +465,9 @@ class OESStore:
             if raw_intensities is not None and "intensity_raw" in f:
                 f["intensity_raw"][index + (slice(None),)] = \
                     np.asarray(raw_intensities).astype("float32")
+            for name, value in (bgsub or {}).items():
+                if name in BGSUB_DATASETS and name in f and value is not None:
+                    f[name][index + (slice(None),)] = np.asarray(value).astype("float32")
             for name, value in (timing or {}).items():
                 if name in TIMING_DATASETS and name in f and value is not None:
                     f[name][index] = float(value)
@@ -492,8 +519,9 @@ class OESStore:
             # intensity_raw + acquisition-time datasets, added 2026-10-14;
             # only present in files written after that.
             out = {}
-            if "intensity_raw" in f:
-                out["intensity_raw"] = (dims + ["wavelength_nm"], f["intensity_raw"][:])
+            for name in ("intensity_raw",) + BGSUB_DATASETS:
+                if name in f:
+                    out[name] = (dims + ["wavelength_nm"], f[name][:])
             for name in TIMING_DATASETS:
                 if name in f:
                     out[name] = (dims, f[name][:])

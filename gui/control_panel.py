@@ -36,6 +36,7 @@ from scan.scan_params import (
 )
 from scan.scan_manager import solve_step_size_for_target_points
 from gui.oes_settings import OESSettingsFrame
+from gui.background_panel import BackgroundSelector
 
 
 class ControlPanel(ttk.Frame):
@@ -137,6 +138,10 @@ class ControlPanel(ttk.Frame):
         # Batch 1 (2026-10-14): OES acquisition settings, from config.yaml.
         self.oes_settings = OESSettingsFrame(self, config)
         self.oes_settings.grid(row=row, column=0, columnspan=3, sticky="we", pady=(6, 0))
+        row += 1
+        # Batch 2 (2026-10-19): background to subtract (saved on the OES Background tab).
+        self.bg_selector = BackgroundSelector(self, config)
+        self.bg_selector.grid(row=row, column=0, columnspan=3, sticky="we", pady=(4, 0))
         row += 1
 
         ttk.Label(self, text="Output dir").grid(row=row, column=0, sticky="w")
@@ -252,6 +257,8 @@ class ControlPanel(ttk.Frame):
         effective_config["output"]["base_dir"] = self.outdir_var.get()
         effective_config["ir"]["enabled"] = self.ir_enabled_var.get()
         effective_config["oes"]["enabled"] = self.oes_enabled_var.get()
+        if not self.bg_selector.confirm_and_apply(effective_config, oes_values):
+            return
 
         # PR2a: only override the grid range/mask when a diameter was
         # actually typed in AND it's strictly smaller than the full
@@ -318,6 +325,7 @@ class ControlPanel(ttk.Frame):
         self.ir_enabled_var.set(bool(self.base_config.get("ir", {}).get("enabled", True)))
         self.oes_enabled_var.set(bool(self.base_config.get("oes", {}).get("enabled", True)))
         self.oes_settings.load_config(self.base_config)
+        self.bg_selector.load_config(self.base_config)
 
         # PR2a: a fresh calibration hand-off changes what the full wafer
         # diameter even IS -- clear any diameter/point-count typed against

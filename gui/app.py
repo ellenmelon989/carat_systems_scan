@@ -48,6 +48,7 @@ from gui.live_map import LiveMapPanel
 from gui.scan_worker import run_scan
 from gui.adaptive_scan_panel import AdaptiveScanPanel
 from gui.line_scan_panel import LineScanPanel
+from gui.background_panel import BackgroundPanel
 from scan.scan_manager import generate_grid
 from scan.scan_params import PASSES_DEFAULT, validate_passes
 
@@ -118,6 +119,17 @@ class App(tk.Tk):
         self.line_scan = LineScanPanel(self.notebook, config, take_shared_motion=self._take_shared_motion)
         self.notebook.add(self.line_scan, text="Line Scan")
 
+        # Batch 2 (2026-10-19): capture/save OES backgrounds. Added AFTER
+        # Line Scan so existing tab indices (notebook.select(1) == Scan)
+        # don't move.
+        self.background = BackgroundPanel(
+            self.notebook, config,
+            can_capture=self._spectrometer_free_for_capture,
+            get_scan_settings=self.control.oes_settings.values,
+            on_saved=self._refresh_background_pickers,
+        )
+        self.notebook.add(self.background, text="OES Background")
+
         # Independent of the Calibrate/Scan hand-off -- see this class's
         # own docstring and gui/adaptive_scan_panel.py's for why.
         self.adaptive_scan = AdaptiveScanPanel(self.notebook, config)
@@ -143,11 +155,36 @@ class App(tk.Tk):
 
         self.control.load_config(config)
         self.line_scan.load_config(config)
+        self.background.load_config(config)
         grid_cfg = config["scan"]["grid"]
         self.live_map.reset(grid_cfg["x_range_mm"], grid_cfg["y_range_mm"], grid_cfg["step_size_mm"])
 
         self.notebook.select(1)  # jump to the Scan tab
         self.status.log_message("Calibration complete — scan parameters refreshed from config.yaml.")
+
+    def _refresh_background_pickers(self):
+        self.control.bg_selector.refresh()
+        self.line_scan.bg_selector.refresh()
+
+    def _spectrometer_free_for_capture(self) -> bool:
+        """Background capture needs the spectrometer to itself."""
+        if self.running or getattr(self.line_scan, "running", False):
+            messagebox.showerror("Scan running",
+                                 "A scan is using the spectrometer. Wait for it to "
+                                 "finish (or abort it) before capturing a background.")
+            return False
+        if self.adaptive_scan.holds_connection():
+            if getattr(self.adaptive_scan, "running", False):
+                messagebox.showerror("Adaptive scan running",
+                                     "Stop the adaptive scan before capturing a background.")
+                return False
+            if not messagebox.askyesno(
+                    "Adaptive Scan connected",
+                    "The Adaptive Scan tab holds the spectrometer.\n\n"
+                    "Disconnect it so the background can be captured?"):
+                return False
+            self.adaptive_scan.release_connections()
+        return True
 
     def _take_shared_motion(self):
         """
@@ -171,6 +208,11 @@ class App(tk.Tk):
              connection and homes normally.
         already_homed is still one-shot.
         """
+        if getattr(self.background, "running", False):
+            messagebox.showerror("Background capture running",
+                                 "A background capture is using the spectrometer. "
+                                 "Wait for it to finish before starting a scan.")
+            return False, None, False
         if self.calibration.holds_connection():
             if self.calibration.finished_but_not_handed_off():
                 current_tab = self.notebook.select()
@@ -315,6 +357,7 @@ class App(tk.Tk):
         self.calibration.shutdown()
         self.line_scan.shutdown()
         self.adaptive_scan.shutdown()
+        self.background.shutdown()
         if self.motion is not None:
             close = getattr(self.motion, "close", None)
             if callable(close):

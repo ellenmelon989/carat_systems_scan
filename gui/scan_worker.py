@@ -91,8 +91,12 @@ def _run_and_report(manager, q, stop_event, already_homed):
     # Non-fatal problems the operator must see before trusting the data
     # (2026-10-10: an invalid OES wavelength calibration). The scan keeps
     # running; the GUI shows a warning dialog + log line.
-    warning = getattr(manager, "calibration_warning", None)
-    if warning:
+    # Batch 2: also an OES background that doesn't match the scan.
+    warnings = list(getattr(manager, "startup_warnings", None) or [])
+    cal = getattr(manager, "calibration_warning", None)
+    if cal and cal not in warnings:
+        warnings.insert(0, cal)
+    for warning in warnings:
         q.put(("warning", warning))
 
     try:

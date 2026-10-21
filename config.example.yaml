@@ -231,6 +231,15 @@ oes:
   integration_time_us: 20000
   num_averages: 3
   boxcar_width: 2
+  # Batch 2 (2026-10-19): OES backgrounds captured on the "OES Background" tab
+  # (or tools/capture_background.py) are saved here; the Scan / Line Scan tabs'
+  # "Background" picker lists them. background_file is set per run by that
+  # picker (null = no subtraction). A background older than
+  # background_max_age_h, or with different acquisition settings, is still
+  # subtracted but flagged at start and recorded with the scan.
+  background_dir: ./backgrounds
+  background_file: null
+  background_max_age_h: 24
   wavelength_calibration:
     # Where the wavelength axis comes from (2026-10-10). auto = ADC1000-USB
     # reads its channel-0 coefficients from EEPROM slots 2-5 (seabreeze's

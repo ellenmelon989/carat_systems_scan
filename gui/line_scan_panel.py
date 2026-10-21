@@ -92,6 +92,7 @@ from scan.scan_params import (
 from scan.live_map_accumulator import LineAccumulator
 from gui.scan_worker import run_scan
 from gui.oes_settings import OESSettingsFrame
+from gui.background_panel import BackgroundSelector
 
 POLL_INTERVAL_MS = 150
 
@@ -209,6 +210,10 @@ class LineScanPanel(ttk.Frame):
         self.oes_settings = OESSettingsFrame(frame, self.base_config)
         self.oes_settings.grid(row=row, column=0, columnspan=3, sticky="we", pady=(6, 0))
         row += 1
+        # Batch 2 (2026-10-19): background to subtract (saved on the OES Background tab).
+        self.bg_selector = BackgroundSelector(frame, self.base_config)
+        self.bg_selector.grid(row=row, column=0, columnspan=3, sticky="we", pady=(4, 0))
+        row += 1
 
         ttk.Label(frame, text="Output dir").grid(row=row, column=0, sticky="w")
         ttk.Entry(frame, textvariable=self.outdir_var, width=30).grid(
@@ -294,6 +299,7 @@ class LineScanPanel(ttk.Frame):
         self.ir_enabled_var.set(bool(self.base_config.get("ir", {}).get("enabled", True)))
         self.oes_enabled_var.set(bool(self.base_config.get("oes", {}).get("enabled", True)))
         self.oes_settings.load_config(self.base_config)
+        self.bg_selector.load_config(self.base_config)
 
         center_mm, _ = self._calibrated_center_and_radius()
         if center_mm is not None:
@@ -424,6 +430,8 @@ class LineScanPanel(ttk.Frame):
         effective_config["output"]["base_dir"] = self.outdir_var.get()
         effective_config["ir"]["enabled"] = self.ir_enabled_var.get()
         effective_config["oes"]["enabled"] = self.oes_enabled_var.get()
+        if not self.bg_selector.confirm_and_apply(effective_config, oes_values):
+            return
 
         # Additive line-mode keys only -- the pre-existing grid-mode keys
         # (x_range_mm/wafer_center_mm/wafer_radius_mm/step_size_mm) are

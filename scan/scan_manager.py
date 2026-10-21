@@ -40,7 +40,8 @@ import numpy as np
 
 from motion.motion_controller import get_motion_controller, AxisStateUnknown
 from readers.ir_reader_base import IR_LOW_PREFIX, get_ir_reader
-from readers.spectrometer_reader_base import get_spectrometer_reader
+from readers.spectrometer_reader_base import boxcar_smooth, get_spectrometer_reader
+from scan import background as bgmod
 from scan.data_logger import DataLogger, build_point_record, resolve_run_dir
 from scan.oes_store import OESStore
 from scan.scan_params import (
@@ -493,6 +494,8 @@ class ScanManager:
                     + ". Check oes.wavelength_calibration in config.yaml and "
                     "run tools/dump_spectrometer_eeprom.py."
                 )
+            self.startup_warnings = [self.calibration_warning] if self.calibration_warning else []
+            self._load_background()
         except Exception:
             # Close everything opened so far (motion only if we own it,
             # plus any reader already constructed) -- a half-initialized
@@ -506,6 +509,43 @@ class ScanManager:
         except Exception:
             self.close()
             raise
+
+    def _load_background(self):
+        """
+        Batch 2 (2026-10-19): load the background chosen at scan start
+        (config oes.background_file; None/"" = no subtraction) and check it
+        against this scan. Pixel-count mismatch -> RuntimeError (can't
+        subtract). Settings/device/axis differences and age -> warning shown
+        at start and recorded with the scan (see bgmod.scan_record).
+        """
+        self.background = None
+        self.background_check = None
+        path = (self.oes_cfg.get("background_file") or "").strip()
+        if not path or not self.oes_enabled:
+            return
+        if not _os.path.exists(path):
+            raise RuntimeError(f"Selected OES background file not found: {path}")
+        bg = bgmod.load(path)
+        device = {}
+        rec = getattr(self.spectrometer, "acquisition_record", None)
+        if callable(rec):
+            r = rec()
+            device = {"serial": r.get("serial"), "model": r.get("model")}
+        check = bgmod.compare(bg, self.oes_settings, self.spectrometer.wavelengths, device)
+        if check["errors"]:
+            raise RuntimeError("Selected OES background can't be used: "
+                               + "; ".join(check["errors"]))
+        self.background, self.background_check = bg, check
+        max_age_h = float(self.oes_cfg.get("background_max_age_h", 24))
+        if check["age_h"] > max_age_h:
+            check["mismatches"].append(
+                f"background is {check['age_h']:.1f} h old (more than {max_age_h:g} h)")
+        if check["mismatches"]:
+            self.startup_warnings.append(
+                "The selected OES background does not match this scan -- it will "
+                "still be subtracted, and this is recorded with the scan:\n  - "
+                + "\n  - ".join(check["mismatches"])
+                + f"\nBackground: {bg.label()}")
 
     def _init_storage(self, config):
         """Output dir, OESStore and DataLogger (split out of __init__ so a
@@ -583,12 +623,14 @@ class ScanManager:
                 start_mm=line_start_mm, end_mm=line_end_mm,
                 n_passes=self.passes,
                 wavelengths=store_wavelengths,
+                background=self.background,
             )
         else:
             _, xs, ys = generate_grid(self.scan_cfg)
             self.store = OESStore(hdf5_path, mode="grid", x_coords_mm=xs, y_coords_mm=ys,
                                    n_passes=self.passes,
-                                   wavelengths=store_wavelengths)
+                                   wavelengths=store_wavelengths,
+                                   background=self.background)
 
         if self.oes_calibration is not None:
             self.store.write_attrs({"wavelength_calibration": self.oes_calibration})
@@ -751,7 +793,17 @@ class ScanManager:
                                 "it, OES is read after it when IR is on"}}
         if self.oes_calibration is not None:
             extra["oes_wavelength_calibration"] = self.oes_calibration
+        self.background_record = bgmod.scan_record(self.background, self.background_check)
+        extra["oes_background"] = self.background_record
+        self.store.write_attrs({"oes_background": self.background_record})
         self.logger.write_metadata(extra)
+        if self.background is not None:
+            self.logger.log_event(
+                "OES background subtraction ON: " + self.background.label()
+                + (" -- MISMATCH: " + "; ".join(self.background_check["mismatches"])
+                   if self.background_check["mismatches"] else ""))
+        elif self.oes_enabled:
+            self.logger.log_event("OES background subtraction OFF (no background selected)")
         s_ = self.oes_settings
         self.logger.log_event(
             f"OES acquisition: integration {s_['integration_time_us']} us x "
@@ -970,9 +1022,18 @@ class ScanManager:
             oes_result = {"saturated": False, "error": True, "skipped": False}
             wavelengths, intensities = None, None
 
+        bgsub = None
+        if intensities is not None and raw_intensities is not None and self.background is not None:
+            raw_sub = bgmod.subtract(raw_intensities, self.background)
+            w = int(self.oes_settings["boxcar_width"])
+            proc_sub = boxcar_smooth(raw_sub, w) if w > 0 else raw_sub
+            bgsub = {"intensity_bgsub": proc_sub, "intensity_raw_bgsub": raw_sub}
+
         if intensities is not None:
+            # Features (and the maps built from them) use the background-
+            # subtracted spectrum when a background is applied.
             feature_values = extract_features(
-                wavelengths, intensities,
+                wavelengths, bgsub["intensity_bgsub"] if bgsub else intensities,
                 self.oes_cfg["features"], self.oes_cfg["feature_window_nm"],
             )
         else:
@@ -991,6 +1052,7 @@ class ScanManager:
         # was skipped/failed. Always present so every CSV row has the same
         # columns. `timestamp` above is when the record was written.
         record.update(timing)
+        record["oes_bg_subtracted"] = bgsub is not None
 
         # Pass ix/iy so DataLogger can forward them to OESStore. Reference
         # points have ix=iy=None regardless of mode — DataLogger skips the
@@ -1008,6 +1070,7 @@ class ScanManager:
             ix=ix,
             iy=iy,
             raw_intensities=raw_intensities,
+            bgsub=bgsub,
         )
 
         if on_point is not None:
